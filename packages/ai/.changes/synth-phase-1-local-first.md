@@ -1,0 +1,1 @@
+- Changed package builds to use the pinned model catalog without contacting remote catalog services.
