@@ -69,12 +69,16 @@ Phase 0 records the checked-out implementation at upstream commit `9bc0055748902
 - The overlay venv must not be supplied as `PRIME_AGENT_KERNEL_PYTHON`, because that would disable automatic provisioning of promoted Python skills.
 - ReasoningBank items, native HarnessState entries, packaged project skills, optimizer history, and telemetry remain distinct stores with explicit ownership.
 
+## `/synth` command mode contract
+
+The `/synth` command family must remain usable in interactive, print, and RPC modes; interactive rendering may be richer, but `hasUI` is never a prerequisite for the command's core result. Phase 2 tests enter `/synth status` in an 80×24 tmux TUI and assert the rendered status, run `--print "/synth status"` and assert deterministic stdout plus exit 0, and drive RPC by asserting `get_commands` advertises `synth`, sending `/synth status` through `prompt`, and checking the returned response/UI-protocol events. The same three-mode contract applies to memory and budget subcommands as they land, and later mutating commands must expose explicit headless arguments instead of relying on an interactive confirmation dialog.
+
 ## Phase 0 validation
 
 - `npm install`: completed with npm `11.12.1`; 353 packages were added and 366 audited. npm reported one moderate and two high dependency advisories for later triage.
 - `npm run build`: completed for `@prime-tui/core`, `@mariozechner/pi-ai`, `@mariozechner/pi-agent-core`, and `@mariozechner/pi-coding-agent`. The current `@mariozechner/pi-ai` build contacted remote model catalogs and rewrote `models.generated.ts`; the generated diff was removed because the catalog is pinned by the upstream baseline until permitted patch A3 in Phase 1.
 - `npm run check`: Biome checked 938 files with no fixes or warnings; TypeScript checking, installer rendering, and browser smoke checks completed successfully.
 - `npx tsx ../../node_modules/vitest/dist/cli.js --run test/suite`, from `packages/coding-agent`: the final post-review run passed 77 test files and 906 tests in 95.52 seconds. A reviewer run under parallel audit load had timed out in regressions 4685 and 4603; isolated 4685 then passed, isolated 4603 passed 4/4, and the final full rerun was green.
-- Isolated faux print proof: built CLI with `--print`, `--model faux/faux`, the repository faux extension, `PI_OFFLINE=1`, a temporary agent directory, and a private daemon socket printed `upgrade response 1` and exited 0. Forced shutdown of that private daemon also exited 0 with no failures.
-- Isolated TUI proof: an 80x24 tmux session with the same faux/offline configuration rendered the v0.8.0 interactive screen, showed model `faux` and cwd `~/synth`, and did not show a login or provider error. Only the specifically named test session was terminated; its private daemon shut down with no failures.
+- `scripts/proof-faux-print.sh`: the bounded, isolated faux print proof uses a private agent directory and short private daemon socket, requires exact stdout `upgrade response 1`, rejects stderr, and exits nonzero unless exact-socket daemon shutdown is proven.
+- `scripts/proof-faux-tui.sh`: the bounded 80×24 tmux proof uses the same isolation, asserts version/model/cwd readiness without login or provider errors, exits through `/quit` with a zero sentinel, and terminates only its exactly named tmux session and daemon socket.
 - `scripts/fetch-refs.sh`: verified all three ignored, shallow, clean reference snapshots against their pinned origins and commits and completed successfully.
