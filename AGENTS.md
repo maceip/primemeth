@@ -252,3 +252,12 @@ git pull --rebase && git push
 ### User override
 
 If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+
+## Synth fork deltas
+
+These rules override only the conflicting upstream development rules above:
+
+- `npm run build` and the phase-gate test commands required by the Synth plan are allowed. `npm run dev`, generic `npm test`, and unrequested broad test runs remain prohibited.
+- GitHub issue, pull-request, and release workflow rules do not apply to Synth fork work unless a later task explicitly invokes them.
+- Feature work stays on `synth/dev`; AutoSaddler runs use `synth/optimizer/*`. The primary agent is the only writer in this worktree. Subagents are limited to read-only reconnaissance and fresh-context gate review.
+- Overlay Python commands must run through a uv-managed Python 3.12 environment. Do not use the host Python for overlay dependencies or tests.
