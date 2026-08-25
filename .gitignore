@@ -36,10 +36,26 @@ out.html
 packages/coding-agent/binaries/
 todo.md
 plans/
-.prime/agent/
+.prime/agent/*
+!.prime/agent/settings.json
+!.prime/agent/models.json
+!.prime/agent/extensions/
+!.prime/agent/extensions/**
+!.prime/agent/skills/
+!.prime/agent/skills/**
 collect.sh
 .kernel-venv/
 .worktrees/
 
 __pycache__/
 *.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+/.synth/
+/refs/
+/local_memory/reasoning_bank.db
+/local_memory/reasoning_bank.db-wal
+/local_memory/reasoning_bank.db-shm
+/local_memory/reasoning_bank.db-journal
