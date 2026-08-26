@@ -1,0 +1,9 @@
+id: dev-mean
+split: development
+prompt: Fix the seeded arithmetic mean so its focused test passes.
+solution:
+  stats.py: |
+    def mean(values: list[float]) -> float:
+        if not values:
+            raise ValueError("mean requires values")
+        return sum(values) / len(values)

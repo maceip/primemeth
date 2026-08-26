@@ -1,0 +1,2 @@
+schema_version: synth-harness-overlay/v1
+verification: focused-pytest

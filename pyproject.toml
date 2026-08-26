@@ -9,9 +9,14 @@ description = "Phase 0 package scaffold for the Synth local coding-agent harness
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastembed>=0.4.0",
+    "jsonschema>=4.23.0",
+    "pyyaml>=6.0.2",
     "sqlite-vec>=0.1.0",
     "tiktoken>=0.8.0",
 ]
+
+[project.scripts]
+synth = "optimizer.cli:main"
 
 [project.optional-dependencies]
 dev = [

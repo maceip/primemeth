@@ -1,0 +1,9 @@
+id: dev-normalize
+split: development
+prompt: Fix the seeded path normalization so its focused test passes.
+solution:
+  paths.py: |
+    def normalize(path: str) -> str:
+        while "//" in path:
+            path = path.replace("//", "/")
+        return path

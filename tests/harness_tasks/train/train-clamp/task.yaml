@@ -1,0 +1,7 @@
+id: train-clamp
+split: train
+prompt: Fix the seeded numeric clamp so its focused test passes.
+solution:
+  bounds.py: |
+    def clamp(value: int, low: int, high: int) -> int:
+        return min(high, max(low, value))

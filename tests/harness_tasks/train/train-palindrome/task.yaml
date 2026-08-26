@@ -1,0 +1,8 @@
+id: train-palindrome
+split: train
+prompt: Fix the seeded palindrome predicate so its focused test passes.
+solution:
+  words.py: |
+    def is_palindrome(value: str) -> bool:
+        normalized = value.lower()
+        return normalized == normalized[::-1]

@@ -1,0 +1,7 @@
+id: train-add
+split: train
+prompt: Fix the seeded add implementation so its focused test passes.
+solution:
+  math_ops.py: |
+    def add(left: int, right: int) -> int:
+        return left + right
