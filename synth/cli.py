@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from middleware.telemetry import TelemetryValidationError, validate_telemetry_file
+from optimizer.cli import main as optimizer_main
 from synth import __version__
 from synth.bridge import run_bridge
 from synth.capabilities import CAPABILITIES
@@ -37,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     embed.add_argument("--kind", choices=("document", "query"), default="document")
 
     commands.add_parser("ports", help="show the research prompt integrity manifest")
+    commands.add_parser("optimize", help="run the AutoSaddler outer loop")
 
     telemetry = commands.add_parser("telemetry", help="read extension telemetry")
     telemetry_commands = telemetry.add_subparsers(
@@ -54,7 +56,11 @@ def _service() -> BridgeService:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments[:1] == ["optimize"]:
+        optimizer_main(arguments)
+        return 0
+    args = _parser().parse_args(arguments)
     command = cast(str, args.command)
     try:
         if command == "status":

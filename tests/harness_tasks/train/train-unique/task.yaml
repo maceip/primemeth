@@ -1,0 +1,7 @@
+id: train-unique
+split: train
+prompt: Fix the seeded unique counter so its focused test passes.
+solution:
+  unique.py: |
+    def count_unique(values: list[str]) -> int:
+        return len(set(values))

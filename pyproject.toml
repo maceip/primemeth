@@ -9,6 +9,8 @@ description = "Local control plane for the Synth coding-agent harness"
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastembed>=0.4.0",
+    "jsonschema>=4.23.0",
+    "pyyaml>=6.0.2",
     "sqlite-vec>=0.1.0",
     "tiktoken>=0.8.0",
 ]
@@ -31,6 +33,7 @@ packages = ["synth", "local_memory", "middleware", "optimizer"]
 line-length = 88
 target-version = "py312"
 src = ["synth", "local_memory", "middleware", "optimizer", "tests"]
+extend-exclude = ["optimizer/vendor/autosaddler_v2"]
 
 [tool.ruff.lint]
 select = [
@@ -61,3 +64,17 @@ pythonpath = ["."]
 python_version = "3.12"
 strict = true
 packages = ["synth", "local_memory", "middleware", "optimizer"]
+exclude = "^optimizer/vendor/autosaddler_v2/"
+
+[[tool.mypy.overrides]]
+module = "optimizer.vendor.autosaddler_v2.*"
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "optimizer.transport"
+disable_error_code = ["misc"]
+
+[[tool.mypy.overrides]]
+module = "optimizer.synth_harness"
+disable_error_code = ["no-any-return"]

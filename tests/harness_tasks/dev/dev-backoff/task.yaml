@@ -1,0 +1,7 @@
+id: dev-backoff
+split: development
+prompt: Fix the seeded exponential backoff so its focused test passes.
+solution:
+  retry.py: |
+    def backoff(base_seconds: float, attempt: int) -> float:
+        return base_seconds * (2**attempt)

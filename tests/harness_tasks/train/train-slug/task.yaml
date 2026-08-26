@@ -1,0 +1,7 @@
+id: train-slug
+split: train
+prompt: Fix the seeded slug conversion so its focused test passes.
+solution:
+  slug.py: |
+    def slugify(value: str) -> str:
+        return "-".join(value.lower().split())

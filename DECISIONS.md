@@ -204,3 +204,10 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Patch every core tool; disable editing and shells entirely; claim exhaustive command-string sandboxing; wait until the compiler exists.
 - Why: `tool_call` is the only extension surface before execution and can preserve normal coding work while preventing ordinary self-modification paths. Symlink, indirection, and subprocess completeness require deterministic package inspection as the second enforcement layer rather than overstating regex coverage.
 - Affected files: `.prime/agent/extensions/synth/guard.ts`, `.prime/agent/extensions/synth/index.ts`, `scripts/synth-phase2-demo.ts`, future Phase 7 skill gate.
+
+## 2026-08-26 — D-0030: Merge the reviewed AutoSaddler engine below the Synth CLI head
+
+- Decision: Merge `synth/p6-autosaddler` as the completed Phase 6 implementation, retain `synth.cli:main` as the only public Python head, and delegate `synth optimize` to `optimizer.cli`. The pinned upstream vendor tree is excluded from fork Ruff rewrites and strict mypy traversal; every non-vendored adapter remains covered, and the generic vendored CLI is statically reachable through the public construction module.
+- Alternatives: Restore `optimizer.cli:main` as a third product entry point; duplicate its parser in `synth`; mechanically reformat and type-repair the reviewed vendor snapshot; rebuild Phase 6.
+- Why: The operator supplied a fresh-clone-reviewed branch and an explicit CLI seam. Rewriting the vendor would invalidate that review and expand `PATCHES.md`, while static reachability plus adapter lint/type checks preserves the two-head law and a clean upstream comparison.
+- Affected files: `pyproject.toml`, `synth/cli.py`, `optimizer/cli.py`, `optimizer/autosaddler.py`, `scripts/check-wiring.sh`, merged `optimizer/vendor/autosaddler_v2/**`.
