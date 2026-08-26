@@ -272,19 +272,21 @@ Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Pa
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
 | `enableBuiltinSkills` | boolean | `true` | Load built-in skills shipped with prime-agent |
-| `bundledSkills.websearch` | boolean | `true` | Load the built-in `websearch` skill |
+| `bundledSkills.websearch` | boolean | `true` (Synth project: `false`) | Load the remote-backed built-in `websearch` skill |
 
 Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
 
-Disable the built-in `websearch` skill while keeping normal skill discovery enabled:
+Synth disables the built-in remote-backed `websearch` skill while keeping normal skill discovery enabled. Explicitly opt in to Serper by changing the shipped value in this project's `.prime/agent/settings.json` to `true`; a global setting cannot override the project-level `false`:
 
 ```json
 {
   "bundledSkills": {
-    "websearch": false
+    "websearch": true
   }
 }
 ```
+
+For local-only discovery, use `rg`/`fd`, a local documentation index, or a project `websearch` skill backed by a self-hosted endpoint.
 
 #### packages
 

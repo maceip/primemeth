@@ -688,3 +688,56 @@ if (fetchCalls !== 0 || existsSync(telemetryPath)) {
 ' "${synth_root}" "${demo_agent_dir}"
 )
 printf 'synth-demo: Phase 1 A4 analytics opt-in policy PASS\n'
+
+(
+	cd "${synth_root}"
+	/usr/bin/env "${demo_environment[@]}" node --input-type=module --eval '
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { DefaultResourceLoader } from "./packages/coding-agent/dist/core/resource-loader.js";
+import { SettingsManager } from "./packages/coding-agent/dist/core/settings-manager.js";
+
+const [projectRoot, agentDir] = process.argv.slice(1);
+const loaderOptions = {
+	cwd: projectRoot,
+	agentDir,
+	noExtensions: true,
+	noPromptTemplates: true,
+	noThemes: true,
+	noContextFiles: true,
+};
+const shippedLoader = new DefaultResourceLoader(loaderOptions);
+await shippedLoader.reload();
+const shippedSkills = shippedLoader.getSkills().skills;
+const shippedNames = new Set(shippedSkills.map((skill) => skill.name));
+if (shippedNames.has("prime-intellect")) {
+	throw new Error("removed Prime Intellect skill remains in the resolved skill set");
+}
+if (shippedNames.has("websearch")) {
+	throw new Error("remote-backed websearch loaded under shipped Synth settings");
+}
+for (const removedPath of [
+	join(projectRoot, "packages/coding-agent/skills/prime-intellect"),
+	join(projectRoot, "packages/coding-agent/dist/skills/prime-intellect"),
+]) {
+	if (existsSync(removedPath)) {
+		throw new Error(`removed Prime Intellect skill still exists at ${removedPath}`);
+	}
+}
+
+const optInLoader = new DefaultResourceLoader({
+	...loaderOptions,
+	settingsManager: SettingsManager.inMemory({ bundledSkills: { websearch: true } }),
+});
+await optInLoader.reload();
+const optInSkills = optInLoader.getSkills().skills;
+const websearch = optInSkills.find((skill) => skill.name === "websearch");
+if (websearch?.kind !== "python" || websearch.python.importName !== "websearch") {
+	throw new Error("explicit websearch opt-in did not resolve the bundled Python skill");
+}
+if (optInSkills.some((skill) => skill.name === "prime-intellect")) {
+	throw new Error("websearch opt-in restored the removed Prime Intellect skill");
+}
+' "${synth_root}" "${demo_agent_dir}"
+)
+printf 'synth-demo: Phase 1 A6 remote-backed skill defaults PASS\n'

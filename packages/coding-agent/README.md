@@ -313,7 +313,7 @@ Skills can also be Python-backed. A Python skill is a normal skill directory wit
 
 Place in `~/.prime/agent/skills/`, `~/.agents/skills/`, `.prime/agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Prime Agent package](#prime-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
-Prime Agent ships with a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
+Prime Agent includes an optional `websearch` skill backed by the remote [Serper](https://serper.dev) API. Synth project settings disable it by default. To opt in, change `bundledSkills.websearch` to `true` in this project's `.prime/agent/settings.json`, then run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. A global setting cannot override the shipped project-level `false`. For local-only discovery, use `rg`/`fd`, a local documentation index, or override `websearch` with a project skill backed by a self-hosted endpoint. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
 
 ### MCP Integrations
 

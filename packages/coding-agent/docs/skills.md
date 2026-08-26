@@ -46,17 +46,16 @@ Disable discovery with `--no-skills` (explicit `--skill` paths still load).
 
 ## Built-in Skills
 
-Prime Agent ships with built-in skills that load by default:
+Prime Agent ships with built-in skills at the lowest precedence. Synth project settings keep remote-backed skills disabled unless explicitly enabled:
 
-- `prime-intellect` - Prime Intellect products and workflows via the prime CLI: verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, sandboxes, tunnels, Prime Inference, GPU compute, and storage. Reference docs for each area load on demand from the skill's `references/` directory.
 - `skill-creator` - teaches the agent to create new skills: markdown skill layout, frontmatter rules, placement and precedence, and the full Python-backed skill contract (package layout, `run()` convention, optional CLI, kernel venv behavior) with a working template in `references/python-skills.md`.
-- `websearch` - a Python-backed Google search skill using the [Serper](https://serper.dev) API.
+- `websearch` - an opt-in Python-backed Google search skill using the remote [Serper](https://serper.dev) API.
 
 Built-in skills behave like any other skill but have the lowest precedence: a user, project, package, or `--skill` skill with the same name overrides the built-in one.
 
 ### websearch
 
-Setup: get a free API key at [serper.dev](https://serper.dev), then run `/login`,
+This skill contacts Serper and is disabled by the shipped Synth project settings. To opt in, change `bundledSkills.websearch` to `true` in this project's `.prime/agent/settings.json` (a global setting cannot override the project-level `false`), get an API key at [serper.dev](https://serper.dev), then run `/login`,
 switch to **MCP Connections** using the displayed tab shortcuts, and choose
 **Serper (web search)** to paste it. The key is stored alongside your other
 credentials (in `auth.json`) and read by the skill on each call — no environment
@@ -80,15 +79,17 @@ print(await websearch("latest Prime Agent release"))
 Until a key is configured, web search returns a clear message telling the agent
 to walk you through `/login`.
 
-Disable only the built-in `websearch` skill in settings:
+Enable the built-in remote-backed `websearch` skill in settings:
 
 ```json
 {
   "bundledSkills": {
-    "websearch": false
+    "websearch": true
   }
 }
 ```
+
+For local-only discovery, use repository search with `rg`/`fd`, index local documentation as a project skill, or override `websearch` with a project skill that talks only to a self-hosted endpoint.
 
 To disable all built-in skills, set `enableBuiltinSkills` to `false` in `settings.json` (or toggle "Built-in skills" in `/settings`):
 
@@ -98,13 +99,7 @@ To disable all built-in skills, set `enableBuiltinSkills` to `false` in `setting
 }
 ```
 
-`--no-skills` also excludes built-in skills. To disable a single built-in skill without a dedicated setting, force-exclude it in the global `skills` array (patterns resolve against the built-in skills directory):
-
-```json
-{
-  "skills": ["-prime-intellect/SKILL.md"]
-}
-```
+`--no-skills` also excludes built-in skills.
 
 ### Using Skills from Other Harnesses
 

@@ -461,8 +461,18 @@ Content`,
 	});
 
 	describe("bundled skills", () => {
-		it("should load the bundled websearch skill by default", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+		it("should reload the bundled websearch skill after project opt-in", async () => {
+			const projectSettingsDir = join(cwd, ".prime", "agent");
+			const projectSettingsPath = join(projectSettingsDir, "settings.json");
+			mkdirSync(projectSettingsDir, { recursive: true });
+			writeFileSync(projectSettingsPath, JSON.stringify({ bundledSkills: { websearch: false } }));
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+			expect(loader.getSkills().skills.some((skill) => skill.name === "websearch")).toBe(false);
+
+			writeFileSync(projectSettingsPath, JSON.stringify({ bundledSkills: { websearch: true } }));
+			await settingsManager.reload();
 			await loader.reload();
 
 			const { skills } = loader.getSkills();
@@ -484,18 +494,6 @@ Content`,
 
 			const { diagnostics } = loader.getSkills();
 			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY"))).toBe(false);
-		});
-
-		it("should not load the bundled websearch skill when disabled in settings", async () => {
-			const settingsManager = SettingsManager.inMemory({ bundledSkills: { websearch: false } });
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			expect(skills.some((s) => s.name === "websearch")).toBe(false);
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY is not set"))).toBe(
-				false,
-			);
 		});
 
 		it("should not load bundled skills when noSkills is true", async () => {

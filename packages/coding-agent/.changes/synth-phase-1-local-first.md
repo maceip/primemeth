@@ -2,3 +2,4 @@
 - Added optional local model settings for daemon session summaries.
 - Changed daemon session recaps to use the optional configured local summary model instead of Prime Inference.
 - Changed pseudonymous product analytics to require an explicit settings or environment opt-in.
+- Removed the bundled Prime Intellect skill and disabled remote-backed web search in the shipped Synth project settings.
