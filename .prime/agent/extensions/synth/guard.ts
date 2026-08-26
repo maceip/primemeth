@@ -1,7 +1,9 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readdirSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { isToolCallEventType, type ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 const ALLOWED_DATA_ROOTS = [".synth", ".prime/agent/skills", ".prime/agent/harness"];
+const OS_PROTECTED_CONTROL_ROOTS = ["packages", "prime-agent-runtime", ".prime/agent/extensions"];
 const PROTECTED_CONTROL_ROOTS = [
 	".prime/agent/extensions",
 	"packages",
@@ -29,7 +31,73 @@ const MUTATING_SHELL =
 const CONTROL_PLANE_SHELL =
 	/(?:^|[;&|]\s*)(?:apply_patch|git\s+(?:add|am|apply|checkout|cherry-pick|clean|commit|merge|mv|rebase|reset|restore|rm|stash|switch|tag|worktree)|npm\s+(?:install|uninstall|update)|pnpm\s+(?:add|install|remove|update)|uv\s+(?:add|lock|remove|sync)|yarn\s+(?:add|install|remove|upgrade))(?:\s|$)/;
 const MUTATING_PYTHON =
-	/(?:open\s*\([^)]*,\s*["'][wax+]|\.write_text\s*\(|\.write_bytes\s*\(|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|shutil\.(?:copy|move|rmtree)|os\.(?:remove|rename|replace|unlink))/;
+	/(?:open\s*\([^)]*,\s*["'][wax+]|\.write_text\s*\(|\.write_bytes\s*\(|\.chmod\s*\(|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|shutil\.(?:copy|move|rmtree)|os\.(?:chmod|remove|rename|replace|unlink))/;
+
+type ManagedWorkspaceKind = "batch" | "optimizer";
+
+function managedWorkspaceKind(environment: NodeJS.ProcessEnv): ManagedWorkspaceKind | undefined {
+	const value = environment.SYNTH_MANAGED_WORKSPACE;
+	return value === "batch" || value === "optimizer" ? value : undefined;
+}
+
+function errorCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+	return typeof error.code === "string" ? error.code : undefined;
+}
+
+function displayPath(cwd: string, path: string): string {
+	return relative(cwd, path).replaceAll("\\", "/") || ".";
+}
+
+function unsafeControlPath(cwd: string, root: string): string | undefined {
+	let component = cwd;
+	for (const part of root.split("/")) {
+		component = join(component, part);
+		try {
+			if (lstatSync(component).isSymbolicLink()) {
+				return `${displayPath(cwd, component)} (symlink)`;
+			}
+		} catch (error) {
+			if (errorCode(error) === "ENOENT") return undefined;
+			return `${displayPath(cwd, component)} (scan failed)`;
+		}
+	}
+
+	const pending = [resolve(cwd, root)];
+	while (pending.length > 0) {
+		const path = pending.pop();
+		if (!path) break;
+		try {
+			const status = lstatSync(path);
+			if (status.isSymbolicLink()) return `${displayPath(cwd, path)} (symlink)`;
+			if ((status.mode & 0o222) !== 0) return displayPath(cwd, path);
+			if (status.isDirectory()) {
+				for (const name of readdirSync(path)) pending.push(join(path, name));
+			} else if (!status.isFile()) {
+				return `${displayPath(cwd, path)} (unsupported file type)`;
+			}
+		} catch {
+			return `${displayPath(cwd, path)} (scan failed)`;
+		}
+	}
+	return undefined;
+}
+
+export function managedControlPlaneWarning(
+	cwd: string,
+	environment: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+	const kind = managedWorkspaceKind(environment);
+	if (!kind) return undefined;
+	const unsafe = OS_PROTECTED_CONTROL_ROOTS.flatMap((root) => {
+		const path = unsafeControlPath(cwd, root);
+		return path ? [path] : [];
+	});
+	if (unsafe.length === 0) return undefined;
+	return `managed ${kind} workspace has writable or unsafe control-plane entries: ${unsafe.join(
+		", ",
+	)}; chmod a-w protection is incomplete`;
+}
 
 function isWithin(parent: string, candidate: string): boolean {
 	const pathFromParent = relative(parent, candidate);

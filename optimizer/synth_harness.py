@@ -49,7 +49,6 @@ from optimizer.vendor.autosaddler_v2.storage.local import LocalRunStore
 TARGET_SKILL_PATH = ".prime/agent/skills/synth-harness/SKILL.md"
 WRITABLE_PATHS = (
     PurePosixPath(".prime/agent/skills"),
-    PurePosixPath(".prime/agent/extensions/synth"),
     PurePosixPath("optimizer/overlays/prompts"),
     PurePosixPath("optimizer/overlays/configs"),
 )
@@ -485,8 +484,8 @@ class SynthHarnessPromptPack:
             schema = _object_schema(("schema_version", "changed_paths", "diagnosis"))
             task_prompt = (
                 "Diagnose the failing training traces and improve only the "
-                "allowlisted Synth skill, steering extension, or overlay "
-                "text/config assets. Do not mention evaluation case IDs in "
+                "allowlisted Synth skill or overlay text/config assets. Do "
+                "not mention evaluation case IDs in "
                 "changed files."
             )
         elif kind == "reflect":
@@ -705,10 +704,7 @@ def _verification_patch(context: GitVerificationContext) -> str:
 def _text_change_errors(context: GitVerificationContext) -> tuple[str, ...]:
     errors: list[str] = []
     for path in context.changed_paths:
-        check_text = context.patch_label == "steering" or path.is_relative_to(
-            PurePosixPath(".prime/agent/extensions/synth")
-        )
-        if not check_text:
+        if context.patch_label != "steering":
             continue
         destination = context.workspace.joinpath(*path.parts)
         if not destination.exists():

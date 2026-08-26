@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+	chmodSync,
 	copyFileSync,
 	mkdirSync,
 	readFileSync,
@@ -53,6 +54,50 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 	}
 	throw new Error(`timed out waiting for ${label}`);
 }
+
+async function proveManagedWorkspaceWarning(): Promise<void> {
+	const warningHarness = await createHarness({ extensionFactories: [synthExtension] });
+	const protectedHarness = await createHarness({ extensionFactories: [synthExtension] });
+	const originalManagedWorkspace = process.env.SYNTH_MANAGED_WORKSPACE;
+	const originalError = console.error;
+	const warnings: string[] = [];
+	try {
+		for (const relative of ["packages", "prime-agent-runtime", ".prime/agent/extensions"]) {
+			mkdirSync(join(warningHarness.tempDir, relative), { recursive: true });
+		}
+		process.env.SYNTH_MANAGED_WORKSPACE = "batch";
+		console.error = (...values: unknown[]) => {
+			const line = values.map(String).join(" ");
+			if (line.startsWith("synth:")) warnings.push(line);
+		};
+		await warningHarness.session.bindExtensions({});
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0] ?? "", /managed batch workspace/);
+		assert.match(warnings[0] ?? "", /packages/);
+		assert.match(warnings[0] ?? "", /prime-agent-runtime/);
+		assert.match(warnings[0] ?? "", /\.prime\/agent\/extensions/);
+		warnings.length = 0;
+		for (const relative of ["packages", "prime-agent-runtime", ".prime/agent/extensions"]) {
+			const root = join(protectedHarness.tempDir, relative);
+			mkdirSync(root, { recursive: true });
+			chmodSync(root, 0o555);
+		}
+		await protectedHarness.session.bindExtensions({});
+		assert.deepEqual(warnings, []);
+		console.log("synth-demo: managed-workspace writable warning PASS");
+	} finally {
+		console.error = originalError;
+		if (originalManagedWorkspace === undefined) {
+			delete process.env.SYNTH_MANAGED_WORKSPACE;
+		} else {
+			process.env.SYNTH_MANAGED_WORKSPACE = originalManagedWorkspace;
+		}
+		warningHarness.cleanup();
+		protectedHarness.cleanup();
+	}
+}
+
+await proveManagedWorkspaceWarning();
 
 let echoExecutions = 0;
 let editExecutions = 0;

@@ -76,7 +76,9 @@ Runtime self-modification is limited to:
 
 The extension denies tool writes outside that set and records the denial. The skill gate repeats the boundary statically, prohibits recursive compilation or refinement, rejects unsafe process/network behavior, prevents bundled-skill shadowing, and requires meaningful tests before promotion.
 
-The control plane includes `packages/`, `prime-agent-runtime/`, `.prime/agent/extensions/`, and the overlay Python packages. It changes only through normal development or an AutoSaddler run on its own branch. The `synth_harness` scenario restricts candidate paths, rejects evaluation identifiers in patches, snapshots and rolls back failed candidates, runs the matched batch, and gates accepted candidates on the disjoint development set.
+The control plane includes `packages/`, `prime-agent-runtime/`, `.prime/agent/extensions/`, and the overlay Python packages. It changes only through normal development or an AutoSaddler run on its own branch. The `synth_harness` scenario restricts candidate paths to project skills and overlay prompt/config assets, rejects evaluation identifiers in patches, snapshots and rolls back failed candidates, runs the matched batch, and gates accepted candidates on the disjoint development set.
+
+Synth-managed batch and optimizer Git worktrees recursively clear all write bits from `packages/`, `prime-agent-runtime/`, and `.prime/agent/extensions/` immediately after creation. Exact original modes are restored before teardown, and spawned sessions carry a managed-workspace marker. Before reading `synth.json`, the extension scans every protected descendant and warns once if any remains writable or unsafe. This is defense in depth, not full OS isolation: a determined process running as the same user can restore modes or replace protected roots through writable parents, and root can bypass them. This host does not provide a Synth container or Firecracker boundary.
 
 ## Storage and concurrency
 

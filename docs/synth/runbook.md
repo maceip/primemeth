@@ -176,7 +176,7 @@ uv run --project . --no-sync synth run \
   --max-trajectories 2
 ```
 
-Batch artifacts live under `.synth/runs/<run-id>/`, including per-trajectory candidates, verifier JSON, patch artifacts, and `selection.json`. A `PIVOT` or `CONTINUE` remains in the current trajectory up to `verifier.maxCycles`; verified success with sufficient remaining budget can start a fresh worktree trajectory.
+Batch artifacts live under `.synth/runs/<run-id>/`, including per-trajectory candidates, verifier JSON, patch artifacts, and `selection.json`. A `PIVOT` or `CONTINUE` remains in the current trajectory up to `verifier.maxCycles`; verified success with sufficient remaining budget can start a fresh worktree trajectory. Each worktree records its protected control-plane roots in `trajectory.json`; Synth removes all write bits from those roots before the agent starts and restores their exact modes before removing the worktree.
 
 For a paired, acceptance-scored ReasoningBank pilot, snapshot a previously distilled bank and run the same fixture cases with memory off and on:
 
@@ -215,6 +215,10 @@ cat .synth/optimizer-runs/local-smoke-001/optimizer-report.json
 ```
 
 Accepted output is a commit whose parent is the source revision. Rejected or non-improving runs leave the optimizer branch at the base revision. The run store also contains the EvoDAG projection, bounded optimizer history, traces, matched-batch evidence, D_dev evaluations, and deferred reflection lessons. Synth does not merge or push optimizer branches automatically.
+
+Optimizer agents may change project skills and allowlisted overlay prompt/config assets. They may not directly change `.prime/agent/extensions/synth/`: all managed mutation, composition, and materialization worktrees keep the extension and the rest of the control plane read-only until teardown. A `managed optimizer workspace has writable or unsafe control-plane entries` warning means that protection is incomplete and the run should be rejected.
+
+The mode-bit guard is not a sandbox or privilege boundary. Same-UID code can attempt to restore permissions or replace a protected root through a writable parent, and root bypasses ordinary permissions. Synth has no full container or Firecracker isolation on this host; use an externally isolated runner if the optimizer model or tools are not trusted to follow the in-process guard.
 
 ## 8. Compile and manage skills
 
@@ -260,6 +264,7 @@ The global `killSwitch.all` and `skillCompiler.enabled` settings stop new runtim
 | `No <tool> budget left.` | The denied call and CRITICAL/exhausted budget are persisted | Raise the next session’s configured budget only if the acceptance task justifies it; do not edit recovered telemetry |
 | `synth.skill.compile` ends `failed` after restart | A detached compiler died or emitted no valid JSON receipt; the terminal failure is durable | Inspect `.synth/compiler-jobs/<request-id>.stderr` and `.synth/audit/skills.jsonl`; submit a new bounded request after correcting the cause |
 | Optimizer rejects a dirty tree | Source isolation is intact and no branch commit was created | Commit or otherwise resolve only your own work, then rerun; never use reset, clean, or stash to bypass this gate |
+| Managed workspace warning names writable control-plane paths | The extension started, but the expected mode-bit defense is incomplete | Stop the batch or optimizer run, inspect worktree creation and mode receipts, and do not accept its candidate evidence |
 
 ## 10. Acceptance and maintenance
 

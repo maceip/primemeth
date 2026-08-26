@@ -116,7 +116,29 @@ def test_batch_preserves_acceptance_memory_seed_and_telemetry(
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / ".gitignore").write_text(".synth/\n")
-    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
+    control_plane_files = []
+    for relative in (
+        Path("packages/example/control.txt"),
+        Path("prime-agent-runtime/example/control.txt"),
+        Path(".prime/agent/extensions/example/control.txt"),
+    ):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("control plane fixture\n")
+        control_plane_files.append(path)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "add",
+            ".gitignore",
+            "packages",
+            "prime-agent-runtime",
+            ".prime",
+        ],
+        check=True,
+    )
     subprocess.run(
         [
             "git",
@@ -135,6 +157,13 @@ def test_batch_preserves_acceptance_memory_seed_and_telemetry(
     )
     seed = tmp_path / "seed.db"
     seed.write_text("immutable-memory-seed")
+    source_modes = {path: path.stat().st_mode for path in control_plane_files}
+    worktrees_before = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
     def success_verifier(request: VerificationRequest) -> dict[str, object]:
         assert request.trajectory.acceptance_exit_code == 0
@@ -156,6 +185,7 @@ def test_batch_preserves_acceptance_memory_seed_and_telemetry(
             cli_argv=(sys.executable, str(_FAKE_CLI)),
             run_id="acceptance-fixture",
             env={
+                "SYNTH_FAKE_ASSERT_CONTROL_PLANE": "1",
                 "SYNTH_FAKE_MEMORY_SEED": seed.read_text(),
                 "SYNTH_FAKE_WRITE_TELEMETRY": "1",
             },
@@ -186,8 +216,21 @@ def test_batch_preserves_acceptance_memory_seed_and_telemetry(
     assert receipt.session_id == "fake-session-1"
     assert metadata["next_action"] == "stop_continuation_disabled"
     assert metadata["telemetry"] == ["telemetry/fake.jsonl"]
+    assert metadata["protected_control_plane_roots"] == [
+        "packages",
+        "prime-agent-runtime",
+        ".prime/agent/extensions",
+    ]
     assert (trajectory_dir / "telemetry" / "fake.jsonl").is_file()
     assert (trajectory_dir / "session" / "session-1.jsonl").is_file()
+    assert {path: path.stat().st_mode for path in control_plane_files} == source_modes
+    worktrees_after = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert worktrees_after == worktrees_before
 
 
 def test_acceptance_failure_skips_verifier_and_candidate(tmp_path: Path) -> None:

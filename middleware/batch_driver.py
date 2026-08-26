@@ -14,9 +14,11 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+from _thread import LockType
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Literal, Protocol, TypedDict
 
 from middleware.prompts_bats import PR_CHAT_VERIFICATION
@@ -29,6 +31,12 @@ from middleware.terminal_outcome import (
     classify_terminal_outcome,
     session_terminal_outcome_receipt_path,
     write_terminal_outcome_receipt,
+)
+from synth.control_plane import (
+    MANAGED_WORKSPACE_ENV,
+    make_control_plane_removable,
+    protected_control_plane,
+    require_control_plane_protected,
 )
 
 VerificationDecision = Literal["SUCCESS", "CONTINUE", "PIVOT"]
@@ -58,6 +66,8 @@ _VERIFICATION_KEYS = {
     "trajectory_summary",
     "details",
 }
+_WORKTREE_LOCKS_GUARD = Lock()
+_WORKTREE_LOCKS: dict[Path, LockType] = {}
 
 
 class VerificationPayload(TypedDict):
@@ -177,6 +187,7 @@ class TrajectoryResult:
     acceptance_integrity_failures: tuple[str, ...]
     terminal_outcome: TerminalOutcome
     telemetry_files: tuple[Path, ...]
+    protected_control_plane_roots: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -315,16 +326,25 @@ def run_batch(
             trajectory_dir = trajectories_dir / str(index)
             trajectory_dir.mkdir()
             worktree = worktree_parent / f"trajectory-{index}"
-            _git(repo, "worktree", "add", "--detach", str(worktree), base_commit)
+            with _worktree_metadata_lock(repo):
+                _git(repo, "worktree", "add", "--detach", str(worktree), base_commit)
             try:
-                result = _invoke_trajectory(
-                    task=task,
-                    config=config,
-                    index=index,
-                    worktree=worktree,
-                    trajectory_dir=trajectory_dir,
-                    initial_budget_used=carried_budget_used,
-                )
+                with protected_control_plane(worktree) as protection:
+                    protected_roots = require_control_plane_protected(worktree)
+                    if protected_roots != protection.protected_roots:
+                        raise BatchDriverError(
+                            "control-plane protection receipt did not match the "
+                            "managed workspace"
+                        )
+                    result = _invoke_trajectory(
+                        task=task,
+                        config=config,
+                        index=index,
+                        worktree=worktree,
+                        trajectory_dir=trajectory_dir,
+                        initial_budget_used=carried_budget_used,
+                        protected_control_plane_roots=protected_roots,
+                    )
                 terminal_outcome = result.terminal_outcome
                 verification: VerificationPayload | None = None
                 candidate_number: int | None = None
@@ -410,7 +430,9 @@ def run_batch(
                 if action != "start_fresh_trajectory":
                     break
             finally:
-                _git(repo, "worktree", "remove", "--force", str(worktree))
+                make_control_plane_removable(worktree)
+                with _worktree_metadata_lock(repo):
+                    _git(repo, "worktree", "remove", "--force", str(worktree))
     finally:
         worktree_parent.rmdir()
 
@@ -509,6 +531,7 @@ def _invoke_trajectory(
     worktree: Path,
     trajectory_dir: Path,
     initial_budget_used: Mapping[str, float],
+    protected_control_plane_roots: tuple[str, ...],
 ) -> TrajectoryResult:
     if config.memory_db_seed is not None:
         memory_path = worktree / ".synth" / "synth.db"
@@ -568,6 +591,7 @@ def _invoke_trajectory(
     ]
     env = os.environ.copy()
     env.update(config.env)
+    env[MANAGED_WORKSPACE_ENV] = "batch"
     env["SYNTH_BATCH_RUN_ID"] = config.run_id
     env["SYNTH_BATCH_TRAJECTORY_INDEX"] = str(index)
     env["SYNTH_BATCH_FORCE_VERIFIER"] = "1"
@@ -721,6 +745,7 @@ def _invoke_trajectory(
         acceptance_integrity_failures=acceptance_integrity_failures,
         terminal_outcome=terminal_outcome,
         telemetry_files=telemetry_files,
+        protected_control_plane_roots=protected_control_plane_roots,
     )
 
 
@@ -921,6 +946,9 @@ def _write_trajectory_metadata(
             "telemetry": [
                 str(path.relative_to(trajectory_dir)) for path in result.telemetry_files
             ],
+            "protected_control_plane_roots": list(
+                result.protected_control_plane_roots
+            ),
         },
     )
 
@@ -943,6 +971,12 @@ def _git(repo: Path, *args: str) -> str:
     if completed.returncode != 0:
         raise BatchDriverError(completed.stderr.strip() or "git command failed")
     return completed.stdout.rstrip("\n")
+
+
+def _worktree_metadata_lock(repo: Path) -> LockType:
+    resolved = repo.resolve()
+    with _WORKTREE_LOCKS_GUARD:
+        return _WORKTREE_LOCKS.setdefault(resolved, Lock())
 
 
 def _shutdown_private_daemon(

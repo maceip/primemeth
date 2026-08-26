@@ -43,6 +43,7 @@ from optimizer.vendor.autosaddler_v2.prompting.models import (
     session_output_validation_error,
 )
 from optimizer.vendor.autosaddler_v2.storage.local import LocalRunStore
+from synth.control_plane import make_control_plane_removable
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,6 +1225,7 @@ def _required_score(evaluation: Evaluation) -> float:
 
 def _prepare_session_attempt_workspace(source: Path | None, destination: Path) -> None:
     if destination.exists():
+        make_control_plane_removable(destination)
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source is None:

@@ -21,6 +21,13 @@ from optimizer.vendor.autosaddler_v2.core.ports import (
     MutationSession,
     WorkspaceDelta,
 )
+from synth.control_plane import (
+    ControlPlaneProtection,
+    ControlPlaneProtectionError,
+    make_control_plane_removable,
+    protect_control_plane,
+    require_control_plane_protected,
+)
 
 PROVIDER_ASSETS = (
     PurePosixPath("CLAUDE.md"),
@@ -78,6 +85,7 @@ class GitHarnessSpace:
             raise ValueError(f"Writable paths overlap forbidden paths: {overlap}")
         self.verifier = verifier
         self._sessions: dict[str, tuple[str, ...]] = {}
+        self._control_plane_protections: dict[Path, ControlPlaneProtection] = {}
 
     def seed(self) -> Candidate:
         return self._publish(self.base_revision, parent_ids=(), change=None)
@@ -95,7 +103,8 @@ class GitHarnessSpace:
         )
         workspace = context.workspace_root.resolve() / session_id.removeprefix("sha256:")
         metadata_path = workspace / ".autosaddler/session.json"
-        if workspace.exists():
+        created = not workspace.exists()
+        if not created:
             metadata = _read_json(metadata_path)
             if metadata.get("parent_id") != parent.candidate_id:
                 raise RuntimeError(f"Mutation workspace parent drifted: {workspace}")
@@ -109,6 +118,12 @@ class GitHarnessSpace:
                     "patch_label": context.patch_label,
                 },
             )
+        try:
+            self._protect_worktree(workspace)
+        except (OSError, RuntimeError):
+            if created:
+                self._remove_worktree(workspace)
+            raise
         self._sessions[session_id] = (parent.candidate_id,)
         return MutationSession(
             session_id=session_id,
@@ -316,6 +331,7 @@ class GitHarnessSpace:
         )
         self._sessions[session_key] = plan.parents
         try:
+            self._protect_worktree(workspace)
             for raw_path, source_id in plan.selections.items():
                 path = _relative_path(raw_path)
                 self._require_writable((path,))
@@ -369,6 +385,11 @@ class GitHarnessSpace:
             {"candidate_id": candidate.candidate_id, "purpose": purpose},
         )
         _exclude_provider_assets(root)
+        try:
+            self._protect_worktree(root)
+        except (OSError, RuntimeError):
+            self._remove_worktree(root)
+            raise
         return MaterializedHarness(
             root=root,
             candidate_id=candidate.candidate_id,
@@ -483,7 +504,16 @@ class GitHarnessSpace:
         )
 
     def _remove_worktree(self, path: Path) -> None:
-        subprocess.run(
+        resolved = path.resolve()
+        restore_error: ControlPlaneProtectionError | None = None
+        protection = self._control_plane_protections.pop(resolved, None)
+        if protection is not None:
+            try:
+                protection.restore()
+            except ControlPlaneProtectionError as error:
+                restore_error = error
+        make_control_plane_removable(resolved)
+        completed = subprocess.run(
             ["git", "worktree", "remove", "--force", str(path)],
             cwd=self.source_repo,
             text=True,
@@ -492,6 +522,45 @@ class GitHarnessSpace:
         )
         if path.exists():
             shutil.rmtree(path)
+        if completed.returncode != 0:
+            _git(self.source_repo, "worktree", "prune")
+        if resolved in _registered_worktrees(self.source_repo):
+            message = completed.stderr.strip() or "git left the worktree registered"
+            raise RuntimeError(f"Could not remove managed worktree {path}: {message}")
+        if restore_error is not None:
+            raise restore_error
+
+    def _protect_worktree(self, path: Path) -> None:
+        resolved = path.resolve(strict=True)
+        existing = self._control_plane_protections.get(resolved)
+        if existing is not None:
+            require_control_plane_protected(resolved)
+            return
+        protection = protect_control_plane(resolved)
+        protected_roots = require_control_plane_protected(resolved)
+        if protected_roots != protection.protected_roots:
+            protection.restore()
+            raise RuntimeError(
+                f"Control-plane protection receipt drifted for {resolved}"
+            )
+        self._control_plane_protections[resolved] = protection
+
+    def cleanup_managed_worktrees(self) -> None:
+        errors: list[str] = []
+        for path in sorted(
+            tuple(self._control_plane_protections),
+            key=lambda item: (len(item.parts), str(item)),
+            reverse=True,
+        ):
+            try:
+                self._remove_worktree(path)
+            except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                errors.append(f"{path}: {error}")
+        if errors:
+            raise RuntimeError(
+                "Could not clean up managed optimizer worktrees: "
+                + "; ".join(errors)
+            )
 
 
 def _validated_roots(
@@ -644,6 +713,14 @@ def _git_worktree_add(repo: Path, destination: Path, revision: str) -> None:
         capture_output=True,
         check=True,
     )
+
+
+def _registered_worktrees(repo: Path) -> set[Path]:
+    worktrees: set[Path] = set()
+    for line in _git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            worktrees.add(Path(line.removeprefix("worktree ")).resolve())
+    return worktrees
 
 
 def _read_json(path: Path) -> dict[str, object]:

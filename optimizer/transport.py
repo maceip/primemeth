@@ -23,6 +23,10 @@ from optimizer.vendor.autosaddler_v2.providers.workspace_renderer import (
     RenderedSession,
     WorkspaceRenderer,
 )
+from synth.control_plane import (
+    MANAGED_WORKSPACE_ENV,
+    require_control_plane_protected,
+)
 
 PRIME_CAPABILITY_TO_TOOLS: Mapping[Capability, tuple[str, ...]] = MappingProxyType(
     {
@@ -83,6 +87,7 @@ class PrimeAgentTransport:
         session: RenderedSession,
         timeout_seconds: float,
     ) -> TransportOutcome:
+        require_control_plane_protected(session.workspace)
         if self.config.api_key_env not in os.environ:
             raise RuntimeError(
                 f"Prime Agent API key environment variable is unset: "
@@ -127,6 +132,7 @@ class PrimeAgentTransport:
                 "PI_SKIP_VERSION_CHECK": "1",
                 "DO_NOT_TRACK": "1",
                 "PRIME_AGENT_TELEMETRY": "0",
+                MANAGED_WORKSPACE_ENV: "optimizer",
             }
         )
         started = asyncio.get_running_loop().time()
@@ -248,6 +254,16 @@ class StubPrimeAgentTransport:
         if not isinstance(context, dict):
             raise TypeError("Stub optimizer context must be an object")
         kind = context.get("session_kind")
+        if kind == "diagnose_patch":
+            protected_roots = require_control_plane_protected(session.workspace)
+            if protected_roots != (
+                "packages",
+                "prime-agent-runtime",
+                ".prime/agent/extensions",
+            ):
+                raise RuntimeError(
+                    "stub diagnosis did not receive the protected Synth control plane"
+                )
         if kind == "evolve":
             candidate_ids = context.get("candidate_ids")
             if not isinstance(candidate_ids, list) or not candidate_ids:

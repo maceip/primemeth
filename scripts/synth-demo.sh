@@ -929,6 +929,16 @@ if [[ -z "${optimizer_report_path}" || -z "${optimizer_gated_commit}" ]]; then
 	printf 'synth-demo: optimizer output omitted its report or gated commit receipt\n' >&2
 	exit 1
 fi
+optimizer_run_dir="${synth_root}/.synth/optimizer-runs/${optimizer_run_id}"
+while IFS= read -r worktree_line; do
+	[[ "${worktree_line}" == worktree\ * ]] || continue
+	worktree_path="${worktree_line#worktree }"
+	if [[ "${worktree_path}" == "${optimizer_run_dir}" || "${worktree_path}" == "${optimizer_run_dir}/"* ]]; then
+		printf 'synth-demo: optimizer left a managed worktree registered: %s\n' "${worktree_path}" >&2
+		exit 1
+	fi
+done < <(git -C "${synth_root}" worktree list --porcelain)
+printf 'synth-demo: Phase 6 control-plane protection and worktree teardown PASS\n'
 node --input-type=module --eval '
 import { readFileSync } from "node:fs";
 

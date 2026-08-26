@@ -75,47 +75,51 @@ def run_optimizer(
         )
     branch_ref = f"refs/heads/{branch}"
     _git(repo, "update-ref", branch_ref, base_revision, ZERO_OID)
-
-    result = runtime.engine.run()
-    state = RunState.replay(runtime.store.events())
-    seed_id = state.accepted_candidate_ids[0]
-    baseline_development = _development_evaluation(state, seed_id)
-    selected_development = _development_evaluation(
-        state,
-        result.selected_candidate_id,
-    )
-    rates = compute_gate_rates(baseline_development, selected_development)
-    gated_commit = base_revision
-    if result.selected_candidate_id != seed_id:
-        selected_revision = _candidate_revision(runtime, result.selected_candidate_id)
-        gated_commit = _create_gated_commit(
-            repo=repo,
-            base_revision=base_revision,
-            selected_revision=selected_revision,
-            run_id=run_id,
-            candidate_id=result.selected_candidate_id,
-            development_score=result.development_score,
-            rates=rates,
+    try:
+        result = runtime.engine.run()
+        state = RunState.replay(runtime.store.events())
+        seed_id = state.accepted_candidate_ids[0]
+        baseline_development = _development_evaluation(state, seed_id)
+        selected_development = _development_evaluation(
+            state,
+            result.selected_candidate_id,
         )
-        _git(repo, "update-ref", branch_ref, gated_commit, base_revision)
+        rates = compute_gate_rates(baseline_development, selected_development)
+        gated_commit = base_revision
+        if result.selected_candidate_id != seed_id:
+            selected_revision = _candidate_revision(
+                runtime, result.selected_candidate_id
+            )
+            gated_commit = _create_gated_commit(
+                repo=repo,
+                base_revision=base_revision,
+                selected_revision=selected_revision,
+                run_id=run_id,
+                candidate_id=result.selected_candidate_id,
+                development_score=result.development_score,
+                rates=rates,
+            )
+            _git(repo, "update-ref", branch_ref, gated_commit, base_revision)
 
-    report_path = runtime.store.run_dir / "optimizer-report.json"
-    report: dict[str, object] = {
-        "schema_version": "synth-optimizer-report/v1",
-        "run_id": run_id,
-        "optimizer_branch": branch,
-        "base_revision": base_revision,
-        "selected_candidate_id": result.selected_candidate_id,
-        "development_score": result.development_score,
-        **asdict(rates),
-        "gated_commit": gated_commit,
-        "report_path": str(report_path),
-    }
-    report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
-    if _git(repo, "branch", "--show-current") != starting_branch:
-        raise RuntimeError("Optimizer changed the current worktree branch")
-    _require_clean(repo)
-    return report
+        report_path = runtime.store.run_dir / "optimizer-report.json"
+        report: dict[str, object] = {
+            "schema_version": "synth-optimizer-report/v1",
+            "run_id": run_id,
+            "optimizer_branch": branch,
+            "base_revision": base_revision,
+            "selected_candidate_id": result.selected_candidate_id,
+            "development_score": result.development_score,
+            **asdict(rates),
+            "gated_commit": gated_commit,
+            "report_path": str(report_path),
+        }
+        report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
+        if _git(repo, "branch", "--show-current") != starting_branch:
+            raise RuntimeError("Optimizer changed the current worktree branch")
+        _require_clean(repo)
+        return report
+    finally:
+        harness.cleanup_managed_worktrees()
 
 
 def _repo_root() -> Path:

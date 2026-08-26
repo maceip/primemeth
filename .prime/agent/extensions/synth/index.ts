@@ -39,7 +39,7 @@ import {
 	type PersistedCompile,
 } from "./compiler.js";
 import { loadSynthConfig, resolveDataPlanePath, type SynthConfig, type SynthConfigLoadResult } from "./config.js";
-import { controlPlaneBlockReason } from "./guard.js";
+import { controlPlaneBlockReason, managedControlPlaneWarning } from "./guard.js";
 import {
 	LESSONS_HEADING,
 	parseMemoryItems,
@@ -1409,6 +1409,10 @@ export default function synthExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (event, ctx) => {
 		const runtime = createRuntime(ctx.cwd);
 		runtimes.set(ctx.sessionManager, runtime);
+		const controlPlaneWarning = managedControlPlaneWarning(ctx.cwd);
+		if (controlPlaneWarning) {
+			warn(runtime, ctx, "control-plane-permissions", controlPlaneWarning);
+		}
 		const config = runtime.configLoad.config;
 		if (runtime.configLoad.state === "invalid") {
 			warn(runtime, ctx, "config", `invalid config; running vanilla: ${runtime.configLoad.error ?? "unknown error"}`);

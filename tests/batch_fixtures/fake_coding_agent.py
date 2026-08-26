@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -25,6 +26,35 @@ def main() -> int:
     initial_raw = os.environ.get("SYNTH_BATCH_BUDGET_USED_JSON", "{}")
     initial_value: object = json.loads(initial_raw)
     initial = initial_value if isinstance(initial_value, dict) else {}
+
+    if os.environ.get("SYNTH_FAKE_ASSERT_CONTROL_PLANE") == "1":
+        if os.environ.get("SYNTH_MANAGED_WORKSPACE") != "batch":
+            raise RuntimeError("batch managed-workspace marker is missing")
+        for relative in (
+            Path("packages"),
+            Path("prime-agent-runtime"),
+            Path(".prime/agent/extensions"),
+        ):
+            root = args.cwd / relative
+            if not root.exists():
+                continue
+            for current, directory_names, file_names in os.walk(
+                root, followlinks=False
+            ):
+                paths = [
+                    Path(current),
+                    *(Path(current) / name for name in directory_names),
+                    *(Path(current) / name for name in file_names),
+                ]
+                for path in paths:
+                    if path.is_symlink():
+                        raise RuntimeError(
+                            f"protected control-plane path is a symlink: {path}"
+                        )
+                    if stat.S_IMODE(path.lstat().st_mode) & 0o222:
+                        raise RuntimeError(
+                            f"protected control-plane path is writable: {path}"
+                        )
 
     expected_seed = os.environ.get("SYNTH_FAKE_MEMORY_SEED")
     if expected_seed is not None:
