@@ -1,3 +1,5 @@
+<img width="514" src="https://github.com/user-attachments/assets/b471b3d3-bc05-4872-8f34-3866c034c3cb" />
+
 # Synth
 
 Synth is a local, self-hostable coding-agent harness being built on a vendored [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace. The vendored baseline is upstream commit `9bc005574`; Synth development is on `synth/dev`.
