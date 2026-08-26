@@ -17,6 +17,12 @@ from middleware.batch_select import select_candidates as _select_candidates
 from middleware.telemetry import TelemetryValidationError, validate_telemetry_file
 from optimizer.cli import main as optimizer_main
 from synth import __version__
+from synth.batch import (
+    BatchWiringError,
+    default_run_id,
+    resolve_task,
+    run_bats,
+)
 from synth.bridge import run_bridge
 from synth.capabilities import CAPABILITIES
 from synth.config import SynthConfigError, load_synth_settings
@@ -50,6 +56,17 @@ def _parser() -> argparse.ArgumentParser:
 
     commands.add_parser("ports", help="show the research prompt integrity manifest")
     commands.add_parser("optimize", help="run the AutoSaddler outer loop")
+
+    run = commands.add_parser("run", help="run a coding task through Synth")
+    run.add_argument("--task", required=True, help="task text or a task-spec path")
+    run.add_argument("--bats", action="store_true", help="enable BATS batch scaling")
+    run.add_argument("--target", type=Path, default=Path.cwd())
+    run.add_argument("--max-trajectories", type=int, default=3)
+    run.add_argument("--base-ref", default="HEAD")
+    run.add_argument("--run-id")
+    run.add_argument("--timeout-seconds", type=float, default=900.0)
+    run.add_argument("--fixture-cli", type=Path, help=argparse.SUPPRESS)
+    run.add_argument("--judge-fixture", type=Path, help=argparse.SUPPRESS)
 
     memory = commands.add_parser("memory", help="inspect ReasoningBank memory")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
@@ -132,6 +149,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if command == "ports":
             _write_json(prompt_port_manifest())
             return 0
+        if command == "run":
+            if not cast(bool, args.bats):
+                raise ValueError("synth run currently requires --bats")
+            target = cast(Path, args.target).expanduser().resolve()
+            task = resolve_task(cast(str, args.task), target)
+            configured_run_id = cast(str | None, args.run_id)
+            _write_json(
+                run_bats(
+                    workspace=target,
+                    task=task,
+                    max_trajectories=cast(int, args.max_trajectories),
+                    base_ref=cast(str, args.base_ref),
+                    run_id=configured_run_id or default_run_id(),
+                    timeout_seconds=cast(float, args.timeout_seconds),
+                    fixture_cli=cast(Path | None, args.fixture_cli),
+                    judge_fixture=cast(Path | None, args.judge_fixture),
+                )
+            )
+            return 0
         if command == "telemetry":
             telemetry_command = cast(str, args.telemetry_command)
             if telemetry_command != "validate":
@@ -204,6 +240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(f"unknown command: {command}")
     except (
         EmbeddingUnavailableError,
+        BatchWiringError,
         MemoryStoreError,
         ModelCallError,
         OSError,

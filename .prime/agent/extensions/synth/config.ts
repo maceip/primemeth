@@ -146,7 +146,7 @@ const DEFAULT_CONFIG: Omit<SynthConfig, "endpoint"> = {
 	},
 	verifier: {
 		interactive: false,
-		batch: false,
+		batch: true,
 		maxCycles: 2,
 		contGen: { enabled: true, minBudgetFrac: 0.2 },
 	},

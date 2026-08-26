@@ -26,11 +26,15 @@ BATS_FRESH_QUERY_THRESHOLD = 5
 BATS_FRESH_FILE_THRESHOLD = 3
 
 _RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_BUDGET_PATTERN = re.compile(
-    r"Query Budget Used:\s*(\d+),\s*"
-    r"Query Budget Remaining:\s*(\d+),\s*"
-    r"(?:URL|File) Budget Used:\s*(\d+),\s*"
-    r"(?:URL|File) Budget Remaining:\s*(\d+)"
+_BUDGET_BLOCK_PATTERN = re.compile(r"<budget>(.*?)</budget>", re.DOTALL)
+_NUMBER_PATTERN = r"(?:\d+(?:\.\d+)?|\.\d+)"
+_BUDGET_FIELDS = (
+    ("bash", "Bash"),
+    ("edit", "Edit"),
+    ("ipython", "IPython"),
+    ("subagents", "Subagent"),
+    ("tokens", "Token"),
+    ("costUsd", "Cost USD"),
 )
 _VERIFICATION_KEYS = {
     "verification",
@@ -50,11 +54,52 @@ class VerificationPayload(TypedDict):
 
 
 @dataclass(frozen=True)
+class BudgetCounterState:
+    used: float
+    remaining: float | None
+
+    @property
+    def limit(self) -> float | None:
+        return None if self.remaining is None else self.used + self.remaining
+
+    @property
+    def remaining_fraction(self) -> float | None:
+        remaining = self.remaining
+        if remaining is None:
+            return None
+        limit = self.used + remaining
+        return 0.0 if limit == 0 else remaining / limit
+
+
+@dataclass(frozen=True)
 class BudgetState:
-    query_used: int
-    query_remaining: int
-    file_used: int
-    file_remaining: int
+    bash: BudgetCounterState
+    edit: BudgetCounterState
+    ipython: BudgetCounterState
+    subagents: BudgetCounterState
+    tokens: BudgetCounterState
+    cost_usd: BudgetCounterState
+
+    def used_values(self) -> dict[str, float]:
+        return {
+            "bash": self.bash.used,
+            "edit": self.edit.used,
+            "ipython": self.ipython.used,
+            "subagents": self.subagents.used,
+            "tokens": self.tokens.used,
+            "costUsd": self.cost_usd.used,
+        }
+
+    def bounded_fractions(self) -> tuple[float, ...]:
+        fractions = (
+            self.bash.remaining_fraction,
+            self.edit.remaining_fraction,
+            self.ipython.remaining_fraction,
+            self.subagents.remaining_fraction,
+            self.tokens.remaining_fraction,
+            self.cost_usd.remaining_fraction,
+        )
+        return tuple(value for value in fractions if value is not None)
 
 
 @dataclass(frozen=True)
@@ -72,6 +117,9 @@ class BatchDriverConfig:
     cli_config_args: tuple[str, ...] = ()
     timeout_seconds: float = 900.0
     env: Mapping[str, str] = field(default_factory=dict)
+    continue_generation: bool = True
+    min_budget_fraction: float = 0.2
+    private_daemon_cli: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -147,26 +195,50 @@ def parse_verification(payload: VerifierResponse) -> VerificationPayload:
 
 
 def parse_budget_text(text: str) -> BudgetState | None:
-    """Return the last persisted BATS budget block in session text."""
-    matches = list(_BUDGET_PATTERN.finditer(text))
-    if not matches:
-        return None
-    query_used, query_remaining, file_used, file_remaining = (
-        int(value) for value in matches[-1].groups()
-    )
-    return BudgetState(
-        query_used=query_used,
-        query_remaining=query_remaining,
-        file_used=file_used,
-        file_remaining=file_remaining,
-    )
+    """Return the last complete persisted Synth budget block."""
+    states: list[BudgetState] = []
+    for match in _BUDGET_BLOCK_PATTERN.finditer(text):
+        counters: dict[str, BudgetCounterState] = {}
+        block = match.group(1)
+        for budget_field, label in _BUDGET_FIELDS:
+            field_match = re.search(
+                rf"{re.escape(label)} Budget Used:\s*({_NUMBER_PATTERN}),\s*"
+                rf"{re.escape(label)} Budget Remaining:\s*"
+                rf"({_NUMBER_PATTERN}|unlimited)",
+                block,
+            )
+            if field_match is None:
+                break
+            remaining_text = field_match.group(2)
+            counters[budget_field] = BudgetCounterState(
+                used=float(field_match.group(1)),
+                remaining=(
+                    None if remaining_text == "unlimited" else float(remaining_text)
+                ),
+            )
+        if len(counters) != len(_BUDGET_FIELDS):
+            continue
+        states.append(
+            BudgetState(
+                bash=counters["bash"],
+                edit=counters["edit"],
+                ipython=counters["ipython"],
+                subagents=counters["subagents"],
+                tokens=counters["tokens"],
+                cost_usd=counters["costUsd"],
+            )
+        )
+    return states[-1] if states else None
 
 
-def should_start_fresh_trajectory(budget: BudgetState) -> bool:
-    """Apply the original BATS strict remaining-budget thresholds."""
-    return (
-        budget.query_remaining > BATS_FRESH_QUERY_THRESHOLD
-        and budget.file_remaining > BATS_FRESH_FILE_THRESHOLD
+def should_start_fresh_trajectory(
+    budget: BudgetState, min_budget_fraction: float = 0.2
+) -> bool:
+    """Require every bounded Synth budget to remain strictly above the threshold."""
+    if not 0.0 <= min_budget_fraction <= 1.0:
+        raise ValueError("min_budget_fraction must be between zero and one")
+    return all(
+        fraction > min_budget_fraction for fraction in budget.bounded_fractions()
     )
 
 
@@ -189,6 +261,7 @@ def run_batch(
     candidates_recorded = 0
     trajectories_run = 0
     stop_reason = "trajectory_limit"
+    carried_budget_used: Mapping[str, float] = {}
     try:
         for index in range(1, task.max_trajectories + 1):
             trajectories_run = index
@@ -203,6 +276,7 @@ def run_batch(
                     index=index,
                     worktree=worktree,
                     trajectory_dir=trajectory_dir,
+                    initial_budget_used=carried_budget_used,
                 )
                 verification: VerificationPayload | None = None
                 candidate_number: int | None = None
@@ -230,9 +304,18 @@ def run_batch(
                         if result.budget is None:
                             action = "stop_missing_budget"
                             stop_reason = "missing_budget"
-                        elif should_start_fresh_trajectory(result.budget):
+                        elif (
+                            config.continue_generation
+                            and should_start_fresh_trajectory(
+                                result.budget, config.min_budget_fraction
+                            )
+                        ):
+                            carried_budget_used = result.budget.used_values()
                             action = "start_fresh_trajectory"
                             stop_reason = "trajectory_limit"
+                        elif not config.continue_generation:
+                            action = "stop_continuation_disabled"
+                            stop_reason = "continuation_disabled"
                         else:
                             action = "stop_low_budget"
                             stop_reason = "low_budget"
@@ -269,6 +352,8 @@ def run_batch(
             "trajectories_run": trajectories_run,
             "candidates_recorded": candidates_recorded,
             "stop_reason": stop_reason,
+            "continue_generation": config.continue_generation,
+            "min_budget_fraction": config.min_budget_fraction,
         },
     )
     return BatchRunResult(
@@ -288,8 +373,17 @@ def _validate_inputs(task: BatchTaskSpec, config: BatchDriverConfig) -> Path:
         raise ValueError("cli_argv must not be empty")
     if config.timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if not 0.0 <= config.min_budget_fraction <= 1.0:
+        raise ValueError("min_budget_fraction must be between zero and one")
     if _RUN_ID_PATTERN.fullmatch(config.run_id) is None:
         raise ValueError("run_id contains unsafe path characters")
+    if (
+        config.private_daemon_cli is not None
+        and not config.private_daemon_cli.is_file()
+    ):
+        raise ValueError(
+            f"private daemon CLI is not a file: {config.private_daemon_cli}"
+        )
 
     requested_repo = task.target_repo.resolve(strict=True)
     actual_repo = Path(_git(requested_repo, "rev-parse", "--show-toplevel")).resolve()
@@ -305,12 +399,19 @@ def _invoke_trajectory(
     index: int,
     worktree: Path,
     trajectory_dir: Path,
+    initial_budget_used: Mapping[str, float],
 ) -> TrajectoryResult:
     session_dir = trajectory_dir / "session"
     session_dir.mkdir()
+    daemon_socket = trajectory_dir / "daemon.sock"
     command = [
         *config.cli_argv,
         *config.cli_config_args,
+        *(
+            ("--daemon-socket", str(daemon_socket))
+            if config.private_daemon_cli is not None
+            else ()
+        ),
         "--cwd",
         str(worktree),
         "--session-dir",
@@ -322,26 +423,43 @@ def _invoke_trajectory(
     env.update(config.env)
     env["SYNTH_BATCH_RUN_ID"] = config.run_id
     env["SYNTH_BATCH_TRAJECTORY_INDEX"] = str(index)
+    env["SYNTH_BATCH_FORCE_VERIFIER"] = "1"
+    env["DO_NOT_TRACK"] = "1"
+    env["PRIME_AGENT_TELEMETRY"] = "0"
+    if initial_budget_used:
+        env["SYNTH_BATCH_BUDGET_USED_JSON"] = json.dumps(
+            initial_budget_used, separators=(",", ":"), sort_keys=True
+        )
 
     timed_out = False
     try:
-        completed = subprocess.run(
-            command,
-            cwd=worktree,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=config.timeout_seconds,
-        )
-        exit_code = completed.returncode
-        stdout = completed.stdout
-        stderr = completed.stderr
-    except subprocess.TimeoutExpired as error:
-        timed_out = True
-        exit_code = 124
-        stdout = _timeout_output(error.stdout)
-        stderr = _timeout_output(error.stderr)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=worktree,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=config.timeout_seconds,
+            )
+            exit_code = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        except subprocess.TimeoutExpired as error:
+            timed_out = True
+            exit_code = 124
+            stdout = _timeout_output(error.stdout)
+            stderr = _timeout_output(error.stderr)
+    finally:
+        if config.private_daemon_cli is not None:
+            _shutdown_private_daemon(
+                node_binary=config.cli_argv[0],
+                cli_path=config.private_daemon_cli,
+                socket_path=daemon_socket,
+                cwd=worktree,
+                environment=env,
+            )
 
     (trajectory_dir / "stdout.txt").write_text(stdout)
     (trajectory_dir / "stderr.txt").write_text(stderr)
@@ -460,10 +578,12 @@ def _write_trajectory_metadata(
     )
     budget = (
         {
-            "query_used": result.budget.query_used,
-            "query_remaining": result.budget.query_remaining,
-            "file_used": result.budget.file_used,
-            "file_remaining": result.budget.file_remaining,
+            "bash": _counter_json(result.budget.bash),
+            "edit": _counter_json(result.budget.edit),
+            "ipython": _counter_json(result.budget.ipython),
+            "subagents": _counter_json(result.budget.subagents),
+            "tokens": _counter_json(result.budget.tokens),
+            "costUsd": _counter_json(result.budget.cost_usd),
         }
         if result.budget is not None
         else None
@@ -486,6 +606,10 @@ def _write_trajectory_metadata(
     )
 
 
+def _counter_json(counter: BudgetCounterState) -> dict[str, float | None]:
+    return {"used": counter.used, "remaining": counter.remaining}
+
+
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
@@ -500,6 +624,46 @@ def _git(repo: Path, *args: str) -> str:
     if completed.returncode != 0:
         raise BatchDriverError(completed.stderr.strip() or "git command failed")
     return completed.stdout.rstrip("\n")
+
+
+def _shutdown_private_daemon(
+    *,
+    node_binary: str,
+    cli_path: Path,
+    socket_path: Path,
+    cwd: Path,
+    environment: Mapping[str, str],
+) -> None:
+    if not socket_path.exists():
+        return
+    module_path = cli_path.parent / "cli" / "daemon-launch.js"
+    if not module_path.is_file():
+        raise BatchDriverError(f"daemon shutdown module is missing: {module_path}")
+    script = (
+        "import { shutdownDaemonAndWait } from "
+        f"{json.dumps(module_path.as_uri())};"
+        "if (!(await shutdownDaemonAndWait(process.argv[1], 10000))) process.exit(1);"
+    )
+    try:
+        completed = subprocess.run(
+            [
+                node_binary,
+                "--input-type=module",
+                "--eval",
+                script,
+                str(socket_path),
+            ],
+            cwd=cwd,
+            env=dict(environment),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise BatchDriverError("private daemon shutdown timed out") from error
+    if completed.returncode != 0:
+        raise BatchDriverError("private daemon shutdown failed")
 
 
 def _timeout_output(value: bytes | str | None) -> str:

@@ -2,13 +2,20 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	serializeConversation,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { BridgeClient } from "./bridge.js";
 import {
 	assistantStalled,
 	BATS_CONTINUATION_NUDGE,
 	BATS_ELISION_MARKER,
 	BATS_WRAP_UP_INSTRUCTION,
+	batchBudgetUsedFromEnvironment,
 	BudgetTracker,
 	elideOldToolResponses,
 	formatBudgetBlock,
@@ -34,6 +41,19 @@ import {
 	TelemetryWriter,
 	type TelemetryEventInput,
 } from "./telemetry.js";
+import {
+	appendActivePlan,
+	assistantText,
+	buildCompactionPrompt,
+	buildVerificationPrompt,
+	condenseTrajectory,
+	extractLastPlan,
+	finalAssistant,
+	formatVerifierGuidance,
+	parsePersistedVerification,
+	type PersistedVerification,
+	VerifierClient,
+} from "./verifier.js";
 
 interface TranscriptRef {
 	sessionFile: string;
@@ -75,6 +95,11 @@ interface SessionRuntime {
 	memoryItemIds: number[];
 	memoryPersisted: boolean;
 	distillEnqueued: boolean;
+	verifier?: VerifierClient;
+	verifiedEntryIds: Set<string>;
+	verificationCycles: number;
+	verificationInFlight: boolean;
+	latestVerification?: PersistedVerification;
 }
 
 function errorMessage(error: unknown): string {
@@ -133,6 +158,9 @@ function createRuntime(cwd: string): SessionRuntime {
 		memoryItemIds: [],
 		memoryPersisted: false,
 		distillEnqueued: false,
+		verifiedEntryIds: new Set(),
+		verificationCycles: 0,
+		verificationInFlight: false,
 	};
 }
 
@@ -271,6 +299,38 @@ function hasMeaningfulTrajectory(ctx: ExtensionContext): boolean {
 	return hasUser && hasAssistant;
 }
 
+function cleanTaskPrompt(text: string): string {
+	return text
+		.replace(/\n?<budget>[\s\S]*?<\/budget>\n?/g, "\n")
+		.replace(/\n?\[Budget:[\s\S]*?\| Regime: [A-Z]+\]\n?/g, "\n")
+		.trim();
+}
+
+function firstTaskFromBranch(ctx: ExtensionContext): string | undefined {
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "user") {
+			continue;
+		}
+		const task = cleanTaskPrompt(contentText(entry.message.content));
+		if (task) return task;
+	}
+	return undefined;
+}
+
+function restorePersistedVerifications(runtime: SessionRuntime, ctx: ExtensionContext): void {
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "custom" || entry.customType !== "synth.verifier.decision") {
+			continue;
+		}
+		const persisted = parsePersistedVerification(entry.data);
+		if (!persisted) continue;
+		runtime.verifiedEntryIds.add(persisted.assistantEntryId);
+		runtime.verificationCycles = Math.max(runtime.verificationCycles, persisted.cycle);
+		runtime.latestVerification = persisted;
+		runtime.taskQuery ??= persisted.task;
+	}
+}
+
 export default function synthExtension(pi: ExtensionAPI): void {
 	const runtimes = new WeakMap<object, SessionRuntime>();
 
@@ -345,6 +405,127 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			});
 		}
 		return runtime.bridge;
+	}
+
+	function verifierMode(runtime: SessionRuntime): "interactive" | "batch" | undefined {
+		const config = runtime.configLoad.config;
+		if (!config || config.killSwitch.all || config.verifier.maxCycles === 0) {
+			return undefined;
+		}
+		if (process.env.SYNTH_BATCH_RUN_ID) {
+			return config.verifier.batch || process.env.SYNTH_BATCH_FORCE_VERIFIER === "1" ? "batch" : undefined;
+		}
+		return config.verifier.interactive ? "interactive" : undefined;
+	}
+
+	function verifierFor(runtime: SessionRuntime): VerifierClient {
+		runtime.verifier ??= new VerifierClient(runtime.configLoad.config?.endpoint);
+		return runtime.verifier;
+	}
+
+	async function verifyConclusion(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		messages: readonly AgentMessage[],
+	): Promise<boolean> {
+		const config = runtime.configLoad.config;
+		const mode = verifierMode(runtime);
+		const budget = runtime.budget;
+		if (!config || !mode || !budget || runtime.verificationInFlight || ctx.hasPendingMessages()) {
+			return false;
+		}
+		if (runtime.verificationCycles >= config.verifier.maxCycles) {
+			return false;
+		}
+		const assistant = finalAssistant(messages);
+		if (
+			!assistant ||
+			assistant.stopReason === "error" ||
+			assistant.stopReason === "aborted" ||
+			assistant.content.some((part) => part.type === "toolCall")
+		) {
+			return false;
+		}
+		const answer = assistantText(assistant);
+		const task = runtime.taskQuery ?? firstTaskFromBranch(ctx);
+		const assistantEntryId = messageEntryId(ctx, assistant);
+		if (!answer || !task || !assistantEntryId || runtime.verifiedEntryIds.has(assistantEntryId)) {
+			return false;
+		}
+		runtime.taskQuery ??= task;
+		runtime.verifiedEntryIds.add(assistantEntryId);
+		runtime.verificationInFlight = true;
+		const cycle = runtime.verificationCycles + 1;
+		try {
+			const trajectory = condenseTrajectory(ctx.sessionManager.getBranch());
+			const result = await verifierFor(runtime).verify(
+				buildVerificationPrompt(task, trajectory, answer, budget.snapshot()),
+			);
+			runtime.verificationCycles = cycle;
+			const persisted: PersistedVerification = {
+				...result,
+				assistantEntryId,
+				cycle,
+				mode,
+				task,
+				timestamp: Date.now(),
+			};
+			runtime.latestVerification = persisted;
+			pi.appendEntry("synth.verifier.decision", persisted);
+			const pointer = transcript(ctx, assistantEntryId);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "bridge",
+				...(pointer ? { transcript: pointer } : {}),
+				data: {
+					action: "verifier.decision",
+					assistantEntryId,
+					cycle,
+					mode,
+					decision: result.decision,
+					justification: result.justification,
+					trajectorySummary: result.trajectorySummary,
+					details: result.details,
+				},
+			});
+			const snapshot = budget.snapshot();
+			if (
+				result.decision !== "SUCCESS" &&
+				cycle < config.verifier.maxCycles &&
+				!snapshot.fullyExhausted &&
+				!ctx.hasPendingMessages()
+			) {
+				runtime.nudgePending = false;
+				pi.sendMessage(
+					{
+						customType: "synth.verifier.guidance",
+						content: formatVerifierGuidance(result, snapshot),
+						display: true,
+						details: { decision: result.decision, cycle, assistantEntryId },
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+				return true;
+			}
+		} catch (error) {
+			warn(
+				runtime,
+				ctx,
+				"verifier",
+				`strategic verifier unavailable; accepting the agent conclusion without guidance: ${errorMessage(error)}`,
+			);
+			const pointer = transcript(ctx, assistantEntryId);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "bridge",
+				...(pointer ? { transcript: pointer } : {}),
+				errorClass: "VerifierUnavailable",
+				data: { action: "verifier.failed", assistantEntryId, cycle, mode },
+			});
+		} finally {
+			runtime.verificationInFlight = false;
+		}
+		return false;
 	}
 
 	async function loadMemoryForTask(runtime: SessionRuntime, ctx: ExtensionContext, taskQuery: string): Promise<void> {
@@ -574,6 +755,8 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		restorePersistedMemory(runtime, ctx);
+		restorePersistedVerifications(runtime, ctx);
+		runtime.taskQuery ??= firstTaskFromBranch(ctx);
 		runtime.initialBudgetInjected = ctx.sessionManager
 			.getBranch()
 			.some((entry) => entry.type === "message" && messageContains(entry.message, "<budget>"));
@@ -587,11 +770,12 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			warn(runtime, ctx, "telemetry", `telemetry unavailable; running vanilla: ${errorMessage(error)}`);
 		}
 		try {
+			const batchInitialUsed = batchBudgetUsedFromEnvironment();
 			runtime.budget = runtime.telemetry
-				? BudgetTracker.fromTelemetry(config.budgets, runtime.telemetry.path)
+				? BudgetTracker.fromTelemetry(config.budgets, runtime.telemetry.path, batchInitialUsed)
 				: telemetryFailed
 					? BudgetTracker.exhausted(config.budgets)
-					: new BudgetTracker(config.budgets);
+					: new BudgetTracker(config.budgets, batchInitialUsed);
 		} catch (error) {
 			runtime.budget = BudgetTracker.exhausted(config.budgets);
 			warn(runtime, ctx, "budget", `budget recovery failed closed: ${errorMessage(error)}`);
@@ -604,6 +788,52 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { reason: event.reason, configPath: runtime.configLoad.path },
 		});
 		persistBudget(runtime, ctx, "session_start", { restored: event.reason === "resume" });
+	});
+
+	pi.on("session_before_compact", async (event, ctx) => {
+		const runtime = runtimeFor(ctx);
+		if (verifierMode(runtime) !== "batch" || !runtime.taskQuery || event.signal.aborted) {
+			return undefined;
+		}
+		const { preparation } = event;
+		const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+		const conversation = serializeConversation(convertToLlm(messages));
+		const activePlan = extractLastPlan(`${preparation.previousSummary ?? ""}\n${conversation}`);
+		try {
+			const generated = await verifierFor(runtime).summarize(
+				buildCompactionPrompt(
+					runtime.taskQuery,
+					conversation,
+					preparation.previousSummary,
+					runtime.latestVerification?.trajectorySummary,
+					activePlan,
+				),
+			);
+			if (event.signal.aborted || !generated.trim()) return undefined;
+			const summary = appendActivePlan(generated, activePlan);
+			const pointer = transcript(ctx);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "bridge",
+				...(pointer ? { transcript: pointer } : {}),
+				data: { action: "verifier.compaction", preservedPlan: activePlan !== undefined },
+			});
+			return {
+				compaction: {
+					summary,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+				},
+			};
+		} catch (error) {
+			warn(
+				runtime,
+				ctx,
+				"verifier-compaction",
+				`batch compaction summary unavailable; using native compaction: ${errorMessage(error)}`,
+			);
+			return undefined;
+		}
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
@@ -641,6 +871,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const runtime = runtimeFor(ctx);
+		runtime.taskQuery ??= cleanTaskPrompt(event.prompt);
 		const systemPrompt = runtime.budget
 			? injectBatsSystemPrompt(event.systemPrompt, runtime.budget.snapshot())
 			: event.systemPrompt;
@@ -835,7 +1066,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("agent_end", (event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		const runtime = runtimeFor(ctx);
 		const lastMessage = event.messages.at(-1);
 		const pointer = transcript(ctx, lastMessage ? messageEntryId(ctx, lastMessage) : ctx.sessionManager.getLeafId());
@@ -849,7 +1080,8 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { messages: event.messages.length, abandonedProviders: runtime.providers.size },
 		});
 		runtime.providers.clear();
-		if (runtime.nudgePending && runtime.budget && !ctx.hasPendingMessages()) {
+		const verifierFollowUpQueued = await verifyConclusion(runtime, ctx, event.messages);
+		if (!verifierFollowUpQueued && runtime.nudgePending && runtime.budget && !ctx.hasPendingMessages()) {
 			runtime.nudgePending = false;
 			pi.sendMessage(
 				{

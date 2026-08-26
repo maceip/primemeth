@@ -43,6 +43,33 @@ export const BATS_CONTINUATION_NUDGE =
 export const BATS_WRAP_UP_INSTRUCTION =
 	"Tool budget is exhausted. Wrap up now: provide the best supported final response, summarize completed work and remaining uncertainty honestly, and do not claim verification you did not perform.";
 
+export function batchBudgetUsedFromEnvironment(): Partial<Record<BudgetKey, number>> {
+	if (!process.env.SYNTH_BATCH_RUN_ID) {
+		return {};
+	}
+	const raw = process.env.SYNTH_BATCH_BUDGET_USED_JSON;
+	if (!raw) {
+		return {};
+	}
+	const value: unknown = JSON.parse(raw);
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("SYNTH_BATCH_BUDGET_USED_JSON must be an object");
+	}
+	const record = value as Record<string, unknown>;
+	if (Object.keys(record).length !== BUDGET_KEYS.length || BUDGET_KEYS.some((key) => !(key in record))) {
+		throw new Error("SYNTH_BATCH_BUDGET_USED_JSON must contain every Synth budget class exactly once");
+	}
+	const result: Partial<Record<BudgetKey, number>> = {};
+	for (const key of BUDGET_KEYS) {
+		const candidate = record[key];
+		if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0) {
+			throw new Error(`SYNTH_BATCH_BUDGET_USED_JSON.${key} must be a nonnegative finite number`);
+		}
+		result[key] = candidate;
+	}
+	return result;
+}
+
 export const BATS_SYSTEM_PROMPT_SECTION = `${BATS_SECTION_START}
 ## Budget-aware execution (BATS)
 
@@ -325,9 +352,13 @@ export class BudgetTracker {
 		this.used = normalizedUsed(restoredUsed);
 	}
 
-	static fromTelemetry(config: SynthBudgetConfig, path: string): BudgetTracker {
+	static fromTelemetry(
+		config: SynthBudgetConfig,
+		path: string,
+		initialUsed: Partial<Record<BudgetKey, number>> = {},
+	): BudgetTracker {
 		if (!existsSync(path)) {
-			return new BudgetTracker(config);
+			return new BudgetTracker(config, initialUsed);
 		}
 		let restored: Partial<Record<BudgetKey, number>> = {};
 		const lines = readFileSync(path, "utf8")

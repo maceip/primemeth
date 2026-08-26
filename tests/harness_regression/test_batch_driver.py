@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from middleware.batch_driver import (
+    BudgetCounterState,
     BudgetState,
     parse_budget_text,
     parse_verification,
@@ -10,25 +11,52 @@ from middleware.batch_driver import (
 )
 
 
+def _budget(remaining: float | None) -> BudgetState:
+    counter = BudgetCounterState(used=1.0, remaining=remaining)
+    unlimited = BudgetCounterState(used=0.0, remaining=None)
+    return BudgetState(
+        bash=counter,
+        edit=unlimited,
+        ipython=unlimited,
+        subagents=unlimited,
+        tokens=unlimited,
+        cost_usd=unlimited,
+    )
+
+
 @pytest.mark.parametrize(
-    ("query_remaining", "file_remaining", "expected"),
-    [(6, 4, True), (5, 4, False), (6, 3, False), (5, 3, False)],
+    ("remaining", "threshold", "expected"),
+    [(4.1, 0.8, True), (4.0, 0.8, False), (0.0, 0.0, False), (None, 1.0, True)],
 )
 def test_fresh_trajectory_thresholds_are_strict(
-    query_remaining: int, file_remaining: int, expected: bool
+    remaining: float | None, threshold: float, expected: bool
 ) -> None:
-    budget = BudgetState(0, query_remaining, 0, file_remaining)
-    assert should_start_fresh_trajectory(budget) is expected
+    assert should_start_fresh_trajectory(_budget(remaining), threshold) is expected
 
 
 def test_parse_budget_text_uses_last_persisted_block() -> None:
     text = (
-        "Query Budget Used: 1, Query Budget Remaining: 9, "
-        "URL Budget Used: 2, URL Budget Remaining: 8\n"
-        "Query Budget Used: 4, Query Budget Remaining: 6, "
-        "File Budget Used: 5, File Budget Remaining: 4\n"
+        "<budget>\n"
+        "Bash Budget Used: 4, Bash Budget Remaining: 6, "
+        "Edit Budget Used: 5, Edit Budget Remaining: 4, "
+        "IPython Budget Used: 1, IPython Budget Remaining: unlimited, "
+        "Subagent Budget Used: 2, Subagent Budget Remaining: 2, "
+        "Token Budget Used: 30, Token Budget Remaining: unlimited, "
+        "Cost USD Budget Used: 0.25, Cost USD Budget Remaining: 0.75\n"
+        "Make the best use of the available resources.\n"
+        "</budget>\n"
     )
-    assert parse_budget_text(text) == BudgetState(4, 6, 5, 4)
+    parsed = parse_budget_text(text)
+    assert parsed is not None
+    assert parsed.used_values() == {
+        "bash": 4.0,
+        "edit": 5.0,
+        "ipython": 1.0,
+        "subagents": 2.0,
+        "tokens": 30.0,
+        "costUsd": 0.25,
+    }
+    assert parsed.bounded_fractions() == (0.6, 4 / 9, 0.5, 0.75)
 
 
 @pytest.mark.parametrize("decision", ["SUCCESS", "CONTINUE", "PIVOT"])

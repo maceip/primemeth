@@ -31,10 +31,20 @@ class MemorySettings:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifierSettings:
+    interactive: bool
+    batch: bool
+    max_cycles: int
+    continue_generation: bool
+    min_budget_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
 class SynthSettings:
     workspace: Path
     endpoint: EndpointSettings | None
     memory: MemorySettings
+    verifier: VerifierSettings
     kill_switch: bool
 
 
@@ -50,6 +60,8 @@ _TOP_LEVEL_KEYS = {
 }
 _ENDPOINT_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
 _MEMORY_KEYS = {"enabled", "k", "minScore", "db", "embedModel", "judgeModel"}
+_VERIFIER_KEYS = {"interactive", "batch", "maxCycles", "contGen"}
+_CONTINUE_GENERATION_KEYS = {"enabled", "minBudgetFrac"}
 
 
 def _object(value: object, label: str) -> dict[str, object]:
@@ -151,6 +163,39 @@ def _memory(workspace: Path, value: object | None) -> MemorySettings:
     )
 
 
+def _verifier(value: object | None) -> VerifierSettings:
+    if value is None:
+        return VerifierSettings(
+            interactive=False,
+            batch=True,
+            max_cycles=2,
+            continue_generation=True,
+            min_budget_fraction=0.2,
+        )
+    mapping = _object(value, "verifier")
+    _exact_keys(mapping, _VERIFIER_KEYS, "verifier")
+    continuation = _object(mapping["contGen"], "verifier.contGen")
+    _exact_keys(
+        continuation, _CONTINUE_GENERATION_KEYS, "verifier.contGen"
+    )
+    return VerifierSettings(
+        interactive=_boolean(mapping["interactive"], "verifier.interactive"),
+        batch=_boolean(mapping["batch"], "verifier.batch"),
+        max_cycles=_integer(
+            mapping["maxCycles"], "verifier.maxCycles", minimum=0, maximum=10
+        ),
+        continue_generation=_boolean(
+            continuation["enabled"], "verifier.contGen.enabled"
+        ),
+        min_budget_fraction=_number(
+            continuation["minBudgetFrac"],
+            "verifier.contGen.minBudgetFrac",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+    )
+
+
 def load_synth_settings(workspace: Path) -> SynthSettings:
     resolved_workspace = workspace.resolve()
     path = resolved_workspace / "synth.json"
@@ -159,6 +204,7 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
             workspace=resolved_workspace,
             endpoint=None,
             memory=_memory(resolved_workspace, None),
+            verifier=_verifier(None),
             kill_switch=False,
         )
     if not path.is_file():
@@ -183,5 +229,6 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
         workspace=resolved_workspace,
         endpoint=endpoint,
         memory=_memory(resolved_workspace, mapping.get("memory")),
+        verifier=_verifier(mapping.get("verifier")),
         kill_switch=kill_switch,
     )
