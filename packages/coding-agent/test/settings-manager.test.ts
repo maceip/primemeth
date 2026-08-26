@@ -290,6 +290,45 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("daemon session summary model", () => {
+		it("is disabled when the setting is absent", () => {
+			const manager = SettingsManager.inMemory();
+
+			expect(manager.getDaemonSessionSummaryModel()).toBeUndefined();
+		});
+
+		it("merges a complete provider and model from global and project settings", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ daemonSessionSummary: { provider: "local" } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ daemonSessionSummary: { model: "local-small" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getDaemonSessionSummaryModel()).toEqual({
+				provider: "local",
+				model: "local-small",
+			});
+		});
+
+		it("is disabled when either value is missing or blank", () => {
+			const incompleteSettings = [
+				{ daemonSessionSummary: { provider: "local" } },
+				{ daemonSessionSummary: { model: "local-small" } },
+				{ daemonSessionSummary: { provider: " ", model: "local-small" } },
+				{ daemonSessionSummary: { provider: "local", model: "\t" } },
+			];
+
+			for (const settings of incompleteSettings) {
+				const manager = SettingsManager.inMemory(settings);
+				expect(manager.getDaemonSessionSummaryModel()).toBeUndefined();
+			}
+		});
+	});
+
 	describe("error tracking", () => {
 		it("should collect and clear load errors via drainErrors", () => {
 			const globalSettingsPath = join(agentDir, "settings.json");

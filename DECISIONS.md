@@ -134,3 +134,10 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Exercise only the public CLI in `scripts/synth-demo.sh`; copy model-selection logic into an overlay test; expose another core API solely for testing.
 - Why: A1 is a permitted core fallback change, but the extension API cannot invoke the private startup fallback selector with controlled model snapshots. The package-local unit regression directly protects the changed behavior without duplicating it or widening the runtime API.
 - Affected files: `packages/coding-agent/test/model-resolver.test.ts`.
+
+## 2026-08-25 — D-0020: Resolve the daemon session-summary model in worker settings
+
+- Decision: Add the optional top-level `daemonSessionSummary.provider/model` setting and its fail-closed accessor to `SettingsManager`, with package-local regression coverage.
+- Alternatives: Configure the built-in summarizer from the Synth extension; add a daemon protocol field; nest the setting under a multi-level daemon object; depend on `defaultModel`.
+- Why: The extension API cannot configure the worker-owned `DaemonSessionSummarizer`, set its recap state, or persist its `agent_status` updates. A top-level object also matches the settings manager's one-level nested merge, allowing global and project halves to compose without widening the daemon wire protocol. The package-local test is necessary because the extension cannot inject controlled global/project settings into this private worker accessor.
+- Affected files: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/test/settings-manager.test.ts`.

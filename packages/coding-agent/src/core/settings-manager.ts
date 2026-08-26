@@ -20,6 +20,11 @@ export interface BranchSummarySettings {
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
 }
 
+export interface DaemonSessionSummarySettings {
+	provider?: string;
+	model?: string;
+}
+
 export interface AutoRefineSettings {
 	enabled?: boolean; // default: true
 	turnInterval?: number; // default: 25 assistant turns
@@ -144,6 +149,7 @@ export interface Settings {
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
+	daemonSessionSummary?: DaemonSessionSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
@@ -906,6 +912,16 @@ export class SettingsManager {
 
 	getBranchSummarySkipPrompt(): boolean {
 		return this.settings.branchSummary?.skipPrompt ?? false;
+	}
+
+	getDaemonSessionSummaryModel(): { provider: string; model: string } | undefined {
+		const summary = this.settings.daemonSessionSummary;
+		if (typeof summary !== "object" || summary === null || Array.isArray(summary)) {
+			return undefined;
+		}
+		const provider = typeof summary.provider === "string" ? summary.provider.trim() : "";
+		const model = typeof summary.model === "string" ? summary.model.trim() : "";
+		return provider && model ? { provider, model } : undefined;
 	}
 
 	getRetryEnabled(): boolean {
