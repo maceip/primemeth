@@ -15,9 +15,14 @@ phase3_driver_path="${script_dir}/synth-phase3-demo.ts"
 phase4_driver_path="${script_dir}/synth-phase4-demo.ts"
 phase5_driver_path="${script_dir}/synth-phase5-demo.ts"
 phase7_driver_path="${script_dir}/synth-phase7-demo.ts"
+phase8_compiler_crash_driver_path="${script_dir}/synth-phase8-compiler-crash.ts"
+phase8_endpoint_driver_path="${script_dir}/synth-phase8-endpoint-down.ts"
+phase8_failure_tests_path="${synth_root}/tests/harness_regression/test_phase8_failures.py"
+optimizer_config_path="${synth_root}/optimizer/configs/synth_local.yaml"
+config_doc_generator_path="${script_dir}/generate-synth-config-doc.ts"
 wiring_script="${script_dir}/check-wiring.sh"
 
-for required_command in git node npm perl tmux; do
+for required_command in git node npm perl tmux uv; do
 	if ! command -v "${required_command}" >/dev/null 2>&1; then
 		printf 'synth-demo: %s is required\n' "${required_command}" >&2
 		exit 1
@@ -52,6 +57,13 @@ if ! git -C "${synth_root}" diff --quiet -- "${catalog_path}" || \
 	printf 'synth-demo: refusing to build with a modified pinned catalog\n' >&2
 	exit 1
 fi
+if [[ -n "$(git -C "${synth_root}" status --porcelain=v1 --untracked-files=all)" ]]; then
+	printf 'synth-demo: Phase 6 requires a clean worktree for its gated optimizer commit\n' >&2
+	exit 1
+fi
+
+source_branch="$(git -C "${synth_root}" branch --show-current)"
+source_head="$(git -C "${synth_root}" rev-parse HEAD)"
 
 catalog_hash_before="$(git -C "${synth_root}" hash-object "${catalog_path}")"
 (
@@ -83,6 +95,11 @@ for required_file in \
 	"${phase4_driver_path}" \
 	"${phase5_driver_path}" \
 	"${phase7_driver_path}" \
+	"${phase8_compiler_crash_driver_path}" \
+	"${phase8_endpoint_driver_path}" \
+	"${phase8_failure_tests_path}" \
+	"${optimizer_config_path}" \
+	"${config_doc_generator_path}" \
 	"${wiring_script}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
@@ -879,12 +896,87 @@ printf 'synth-demo: Phase 4 two-session ReasoningBank loop PASS\n'
 )
 printf 'synth-demo: Phase 5 strategic verifier and hybrid batch PASS\n'
 
+optimizer_run_id="synth-demo-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+optimizer_branch="synth/optimizer/${optimizer_run_id}"
+optimizer_output="$(
+	cd "${synth_root}"
+	UV_OFFLINE=1 uv run --project . --no-sync synth optimize \
+		--config "${optimizer_config_path}" \
+		--run-id "${optimizer_run_id}" \
+		--branch "${optimizer_branch}"
+)"
+printf '%s\n' "${optimizer_output}"
+optimizer_report_path="$(awk -F= '$1 == "report" { print substr($0, index($0, "=") + 1) }' <<<"${optimizer_output}")"
+optimizer_gated_commit="$(awk -F= '$1 == "gated_commit" { print $2 }' <<<"${optimizer_output}")"
+if [[ -z "${optimizer_report_path}" || -z "${optimizer_gated_commit}" ]]; then
+	printf 'synth-demo: optimizer output omitted its report or gated commit receipt\n' >&2
+	exit 1
+fi
+node --input-type=module --eval '
+import { readFileSync } from "node:fs";
+
+const [reportPath, runId, branch, baseRevision, gatedCommit] = process.argv.slice(1);
+const report = JSON.parse(readFileSync(reportPath, "utf8"));
+if (
+	report.schema_version !== "synth-optimizer-report/v1" ||
+	report.run_id !== runId ||
+	report.optimizer_branch !== branch ||
+	report.base_revision !== baseRevision ||
+	report.gated_commit !== gatedCommit ||
+	report.gated_commit === report.base_revision ||
+	report.development_score !== 1 ||
+	report.fix_rate !== 1 ||
+	report.regression_rate !== 0 ||
+	report.fixed !== report.baseline_failures ||
+	report.fixed < 1 ||
+	report.regressed !== 0
+) {
+	throw new Error(`optimizer report did not prove a strict, regression-free improvement: ${JSON.stringify(report)}`);
+}
+' "${optimizer_report_path}" "${optimizer_run_id}" "${optimizer_branch}" "${source_head}" "${optimizer_gated_commit}"
+if [[ "$(git -C "${synth_root}" rev-parse "refs/heads/${optimizer_branch}")" != "${optimizer_gated_commit}" ]] || \
+	[[ "$(git -C "${synth_root}" rev-parse "${optimizer_gated_commit}^")" != "${source_head}" ]]; then
+	printf 'synth-demo: optimizer branch does not point at a direct gated child of the source revision\n' >&2
+	exit 1
+fi
+if [[ "$(git -C "${synth_root}" diff --name-only "${source_head}" "${optimizer_gated_commit}")" != '.prime/agent/skills/synth-harness/SKILL.md' ]]; then
+	printf 'synth-demo: optimizer gated commit escaped its declared skill surface\n' >&2
+	exit 1
+fi
+if [[ "$(git -C "${synth_root}" branch --show-current)" != "${source_branch}" ]] || \
+	[[ "$(git -C "${synth_root}" rev-parse HEAD)" != "${source_head}" ]] || \
+	[[ -n "$(git -C "${synth_root}" status --porcelain=v1 --untracked-files=all)" ]]; then
+	printf 'synth-demo: optimizer changed the source branch, HEAD, or worktree\n' >&2
+	exit 1
+fi
+printf 'synth-demo: Phase 6 AutoSaddler gated commit PASS branch=%s fix_rate=1 regression_rate=0\n' \
+	"${optimizer_branch}"
+
 (
 	cd "${synth_root}"
 	TSX_TSCONFIG_PATH="${synth_root}/tsconfig.base.json" \
 		"${tsx_path}" "${phase7_driver_path}"
 )
 printf 'synth-demo: Phase 7 dynamic skill compiler and problem framing PASS\n'
+
+(
+	cd "${synth_root}"
+	PI_OFFLINE=1 UV_OFFLINE=1 \
+		uv run --project . --no-sync pytest -q "${phase8_failure_tests_path}"
+)
+printf 'synth-demo: Phase 8 four bounded failure injections PASS\n'
+
+(
+	cd "${synth_root}"
+	PI_OFFLINE=1 UV_OFFLINE=1 "${tsx_path}" "${phase8_compiler_crash_driver_path}"
+)
+printf 'synth-demo: Phase 8 detached compiler crash receipt PASS\n'
+
+(
+	cd "${synth_root}"
+	"${tsx_path}" "${config_doc_generator_path}" --check
+)
+printf 'synth-demo: Phase 8 generated configuration reference PASS\n'
 
 bridge_output="$({
 	printf '%s\n' 'not-json'
@@ -938,4 +1030,5 @@ printf 'synth-demo: Phase 2 prepared local embedder PASS\n'
 	cd "${synth_root}"
 	"${wiring_script}"
 )
+printf 'synth-demo: FULL LOOP PASS memory=distilled+retrieved budgets=visible+enforced verifier=pivot optimizer=gated skill=compiled+promoted+invoked\n'
 printf 'synth-demo: Phase 2 two-head wiring PASS\n'

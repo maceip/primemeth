@@ -544,6 +544,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 	): PersistedCompile {
 		const persisted = persistCompile(request, status, detail);
 		pi.appendEntry("synth.skill.compile", persisted);
+		ctx.sessionManager.flushNow();
 		runtime.compileRequests.set(request.requestId, persisted);
 		const pointer = transcript(ctx);
 		appendTelemetry(runtime, ctx, {

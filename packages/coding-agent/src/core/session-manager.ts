@@ -272,6 +272,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getSessionName"
+	| "flushNow"
 >;
 
 function createSessionId(): string {

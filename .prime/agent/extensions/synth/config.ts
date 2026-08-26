@@ -5,29 +5,61 @@ import { Value } from "typebox/value";
 
 const EndpointSchema = Type.Object(
 	{
-		baseUrl: Type.String({ minLength: 1 }),
-		model: Type.String({ minLength: 1 }),
-		smallModel: Type.String({ minLength: 1 }),
-		apiKeyEnv: Type.String({ minLength: 1 }),
+		baseUrl: Type.String({
+			minLength: 1,
+			description: "Local OpenAI-compatible endpoint base URL.",
+		}),
+		model: Type.String({ minLength: 1, description: "Primary local model identifier." }),
+		smallModel: Type.String({
+			minLength: 1,
+			description: "Local model used for judging, verification, and summaries.",
+		}),
+		apiKeyEnv: Type.String({
+			minLength: 1,
+			description: "Environment variable containing the local endpoint API key.",
+		}),
 	},
 	{ additionalProperties: false },
 );
 
 const TelemetryConfigSchema = Type.Object(
-	{ dir: Type.String({ minLength: 1 }) },
+	{
+		dir: Type.String({
+			minLength: 1,
+			description: "Append-only Synth telemetry directory inside .synth.",
+		}),
+	},
 	{ additionalProperties: false },
 );
 
 const BudgetsSchema = Type.Object(
 	{
-		bash: Type.Integer({ minimum: 0 }),
-		edit: Type.Integer({ minimum: 0 }),
-		ipython: Type.Integer({ minimum: 0 }),
-		subagents: Type.Integer({ minimum: 0 }),
-		tokens: Type.Integer({ minimum: 0 }),
-		costUsd: Type.Number({ minimum: 0 }),
-		elideToolResponsesAfterTurns: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
-		noneAnswerThreshold: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+		bash: Type.Integer({ minimum: 0, description: "Per-session bash tool-call ceiling; zero is unlimited." }),
+		edit: Type.Integer({ minimum: 0, description: "Per-session edit tool-call ceiling; zero is unlimited." }),
+		ipython: Type.Integer({
+			minimum: 0,
+			description: "Per-session IPython tool-call ceiling; zero is unlimited.",
+		}),
+		subagents: Type.Integer({
+			minimum: 0,
+			description: "Per-session subagent-spawn ceiling; zero is unlimited.",
+		}),
+		tokens: Type.Integer({ minimum: 0, description: "Native token-usage ceiling; zero is unlimited." }),
+		costUsd: Type.Number({ minimum: 0, description: "Native cost ceiling in USD; zero is unlimited." }),
+		elideToolResponsesAfterTurns: Type.Optional(
+			Type.Integer({
+				minimum: 0,
+				maximum: 100,
+				description: "Turn age after which old tool responses are omitted; zero disables elision.",
+			}),
+		),
+		noneAnswerThreshold: Type.Optional(
+			Type.Integer({
+				minimum: 1,
+				maximum: 20,
+				description: "Consecutive no-tool answers before a remaining-budget continuation nudge.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -45,25 +77,29 @@ export interface SynthBudgetConfig {
 
 const MemorySchema = Type.Object(
 	{
-		enabled: Type.Boolean(),
-		k: Type.Integer({ minimum: 1, maximum: 20 }),
-		minScore: Type.Number({ minimum: 0, maximum: 1 }),
-		db: Type.String({ minLength: 1 }),
-		embedModel: Type.String({ minLength: 1 }),
-		judgeModel: Type.String({ minLength: 1 }),
+		enabled: Type.Boolean({ description: "Enable ReasoningBank retrieval and shutdown distillation." }),
+		k: Type.Integer({ minimum: 1, maximum: 20, description: "Maximum retrieved items per memory class." }),
+		minScore: Type.Number({ minimum: 0, maximum: 1, description: "Minimum cosine similarity for retrieval." }),
+		db: Type.String({ minLength: 1, description: "SQLite database path inside .synth." }),
+		embedModel: Type.String({ minLength: 1, description: "Pinned FastEmbed model identifier." }),
+		judgeModel: Type.String({ minLength: 1, description: "Endpoint model selector used by the trajectory judge." }),
 	},
 	{ additionalProperties: false },
 );
 
 const VerifierSchema = Type.Object(
 	{
-		interactive: Type.Boolean(),
-		batch: Type.Boolean(),
-		maxCycles: Type.Integer({ minimum: 0, maximum: 10 }),
+		interactive: Type.Boolean({ description: "Run strategic verification in interactive sessions." }),
+		batch: Type.Boolean({ description: "Run strategic verification in Synth batch sessions." }),
+		maxCycles: Type.Integer({ minimum: 0, maximum: 10, description: "Maximum CONTINUE or PIVOT guidance cycles." }),
 		contGen: Type.Object(
 			{
-				enabled: Type.Boolean(),
-				minBudgetFrac: Type.Number({ minimum: 0, maximum: 1 }),
+				enabled: Type.Boolean({ description: "Allow fresh trajectories after verified success." }),
+				minBudgetFrac: Type.Number({
+					minimum: 0,
+					maximum: 1,
+					description: "Minimum remaining budget fraction for another fresh trajectory.",
+				}),
 			},
 			{ additionalProperties: false },
 		),
@@ -72,21 +108,21 @@ const VerifierSchema = Type.Object(
 );
 
 const OptimizerSchema = Type.Object(
-	{ config: Type.String({ minLength: 1 }) },
+	{ config: Type.String({ minLength: 1, description: "AutoSaddler v2 scenario configuration path." }) },
 	{ additionalProperties: false },
 );
 
 const SkillCompilerSchema = Type.Object(
 	{
-		enabled: Type.Boolean(),
-		maxPerSession: Type.Integer({ minimum: 0, maximum: 20 }),
-		quarantine: Type.String({ minLength: 1 }),
+		enabled: Type.Boolean({ description: "Enable runtime skill compilation requests." }),
+		maxPerSession: Type.Integer({ minimum: 0, maximum: 20, description: "Maximum admitted compiler requests per session." }),
+		quarantine: Type.String({ minLength: 1, description: "Compiler quarantine path inside .synth." }),
 	},
 	{ additionalProperties: false },
 );
 
 const KillSwitchSchema = Type.Object(
-	{ all: Type.Boolean() },
+	{ all: Type.Boolean({ description: "Disable all Synth runtime features when true." }) },
 	{ additionalProperties: false },
 );
 
@@ -124,7 +160,7 @@ export interface SynthConfigLoadResult {
 	error?: string;
 }
 
-const DEFAULT_CONFIG: Omit<SynthConfig, "endpoint"> = {
+export const SYNTH_CONFIG_DEFAULTS: Omit<SynthConfig, "endpoint"> = {
 	telemetry: { dir: ".synth/telemetry" },
 	budgets: {
 		bash: 0,
@@ -172,13 +208,13 @@ export function resolveDataPlanePath(cwd: string, configuredPath: string): strin
 function normalizeConfig(cwd: string, value: SynthConfigFile): SynthConfig {
 	const config: SynthConfig = {
 		...(value.endpoint ? { endpoint: value.endpoint } : {}),
-		telemetry: value.telemetry ?? DEFAULT_CONFIG.telemetry,
-		budgets: { ...DEFAULT_CONFIG.budgets, ...value.budgets },
-		memory: value.memory ?? DEFAULT_CONFIG.memory,
-		verifier: value.verifier ?? DEFAULT_CONFIG.verifier,
-		optimizer: value.optimizer ?? DEFAULT_CONFIG.optimizer,
-		skillCompiler: value.skillCompiler ?? DEFAULT_CONFIG.skillCompiler,
-		killSwitch: value.killSwitch ?? DEFAULT_CONFIG.killSwitch,
+		telemetry: value.telemetry ?? SYNTH_CONFIG_DEFAULTS.telemetry,
+		budgets: { ...SYNTH_CONFIG_DEFAULTS.budgets, ...value.budgets },
+		memory: value.memory ?? SYNTH_CONFIG_DEFAULTS.memory,
+		verifier: value.verifier ?? SYNTH_CONFIG_DEFAULTS.verifier,
+		optimizer: value.optimizer ?? SYNTH_CONFIG_DEFAULTS.optimizer,
+		skillCompiler: value.skillCompiler ?? SYNTH_CONFIG_DEFAULTS.skillCompiler,
+		killSwitch: value.killSwitch ?? SYNTH_CONFIG_DEFAULTS.killSwitch,
 	};
 	resolveDataPlanePath(cwd, config.telemetry.dir);
 	resolveDataPlanePath(cwd, config.memory.db);

@@ -10,6 +10,7 @@ from typing import cast
 from local_memory.embedder import EmbeddingUnavailableError, LocalEmbedder
 from local_memory.retrieval import MemoryRetriever
 from local_memory.store import (
+    DEFAULT_BUSY_TIMEOUT_MS,
     MemoryItem,
     MemoryItemType,
     MemoryStatus,
@@ -156,9 +157,15 @@ def _memory_item(item: MemoryItem, *, score: float | None = None) -> JsonObject:
 
 
 class BridgeService:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        memory_busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> None:
         self._workspace = workspace.resolve()
         self._settings: SynthSettings = load_synth_settings(self._workspace)
+        self._memory_busy_timeout_ms = memory_busy_timeout_ms
         self._embedder: LocalEmbedder | None = None
         self._memory_store: MemoryStore | None = None
 
@@ -182,6 +189,7 @@ class BridgeService:
             self._memory_store = MemoryStore(
                 self._settings.memory.database_path,
                 embedder=self._embedder_or_create(),
+                busy_timeout_ms=self._memory_busy_timeout_ms,
                 workspace=self._workspace,
             )
         return self._memory_store

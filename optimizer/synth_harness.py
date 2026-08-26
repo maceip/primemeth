@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -55,11 +56,6 @@ FORBIDDEN_PATHS = (
     PurePosixPath("data"),
 )
 PYTEST_REQUIREMENT = "pytest>=8.0.0"
-RUFF_REQUIREMENT = "ruff>=0.8.0"
-VERIFIER_RUNTIME_REQUIREMENTS = (
-    "pyyaml>=6.0.2",
-    "jsonschema>=4.23.0",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,8 +81,13 @@ class SynthHarnessSettings:
 
 
 class SynthHarnessVerifier:
-    def __init__(self, *, case_ids: Sequence[str]) -> None:
+    def __init__(self, *, case_ids: Sequence[str], tsx_path: Path) -> None:
         self.case_ids = tuple(case_ids)
+        self.tsx_path = tsx_path.resolve()
+        if not self.tsx_path.is_file():
+            raise FileNotFoundError(
+                f"Synth harness verifier requires tsx at {self.tsx_path}"
+            )
 
     def __call__(self, context: GitVerificationContext) -> GitVerificationVerdict:
         patch = _verification_patch(context)
@@ -95,7 +96,8 @@ class SynthHarnessVerifier:
         commands = (
             (
                 "ruff check",
-                *_uv_run_prefix(RUFF_REQUIREMENT),
+                sys.executable,
+                "-m",
                 "ruff",
                 "check",
                 str(context.workspace / "optimizer"),
@@ -105,10 +107,8 @@ class SynthHarnessVerifier:
             ),
             (
                 "pytest tests/harness_regression",
-                *_uv_run_prefix(
-                    PYTEST_REQUIREMENT,
-                    *VERIFIER_RUNTIME_REQUIREMENTS,
-                ),
+                sys.executable,
+                "-m",
                 "pytest",
                 str(context.workspace / "tests/harness_regression"),
                 "-q",
@@ -121,6 +121,7 @@ class SynthHarnessVerifier:
         command_failures: list[str] = []
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["SYNTH_TEST_TSX"] = str(self.tsx_path)
         for label, *command in commands:
             result = subprocess.run(
                 command,
@@ -457,7 +458,10 @@ def build_synth_harness_components(
         settings.development_case_ids,
     )
     all_tasks = {**train_tasks, **development_tasks}
-    verifier = SynthHarnessVerifier(case_ids=tuple(all_tasks))
+    verifier = SynthHarnessVerifier(
+        case_ids=tuple(all_tasks),
+        tsx_path=settings.source_repo / "node_modules" / ".bin" / "tsx",
+    )
     harness = GitHarnessSpace(
         source_repo=settings.source_repo,
         base_revision=settings.base_revision,

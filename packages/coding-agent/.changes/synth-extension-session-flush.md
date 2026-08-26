@@ -1,0 +1,1 @@
+- Added extension-context access to flush durable pre-turn session entries.

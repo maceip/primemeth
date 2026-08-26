@@ -39,6 +39,7 @@
 			"!**/models.generated.ts",
 			"!packages/mom/data/**/*",
 			"!!**/node_modules",
+			"!.synth",
 			"!.worktrees",
 			"!.claude/worktrees"
 		]

@@ -1,61 +1,93 @@
-<img width="514" src="https://github.com/user-attachments/assets/b471b3d3-bc05-4872-8f34-3866c034c3cb" />
-
 # Synth
 
-Synth is a local, self-hostable coding-agent harness being built on a vendored [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace. The vendored baseline is upstream commit `9bc005574`; Synth development is on `synth/dev`.
+Synth is a local-first, self-hostable coding-agent harness built on a vendored [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace. It combines ReasoningBank memory, BATS budget-aware execution and strategic verification, an AutoSaddler v2 outer optimization loop, and a quarantine-gated Dynamic Skill Compiler behind one TypeScript extension and one Python CLI.
 
-## Phase 0 status
+The vendored baseline is upstream commit `9bc005574`. Synth development lives on `synth/dev`; runtime and optimizer state are local and ignored.
 
-Only the reconnaissance and baseline scaffold exist. The Python files under `local_memory/`, `middleware/`, and `optimizer/` are docstring-only placeholders; the SQL file is noncanonical; and `tests/harness_regression/` contains no behavioral tests yet. ReasoningBank, BATS, AutoSaddler, the Dynamic Skill Compiler, the `synth` extension, and the `synth` CLI are not implemented in Phase 0.
+## What Synth adds
 
-The reviewed implementation plan is [INTEGRATION_MAP.md](INTEGRATION_MAP.md). Verified upstream anchors and drift are in [ARCHITECTURE_NOTES.md](ARCHITECTURE_NOTES.md), and implementation-boundary decisions are append-only in [DECISIONS.md](DECISIONS.md).
+- ReasoningBank distills generalizable lessons from successful and failed v3 session trajectories, stores them in local SQLite plus sqlite-vec, and retrieves them into the next related session.
+- BATS exposes per-tool, token, and cost budgets in the transcript, changes execution regimes as resources fall, denies exhausted calls, elides stale observations, and verifies conclusions as `SUCCESS`, `CONTINUE`, or `PIVOT`.
+- Batch scaling runs fresh worktree trajectories, records verified candidates, and selects the best result with pass, select, and first-attempt metrics.
+- AutoSaddler v2 optimizes the harness through matched training mini-batches and a disjoint development gate, creating durable accepted commits only on `synth/optimizer/*` branches.
+- The Dynamic Skill Compiler turns recurring workflows into complete Python-backed skills, tests them in ephemeral uv environments, applies deterministic static safety gates, and promotes only accepted packages into `.prime/agent/skills/`.
+- Append-only Synth telemetry indexes the native Prime Agent transcript without replacing it. All runtime model traffic targets the configured OpenAI-compatible endpoint.
 
-## Layout
+## Quick start
 
-```text
-synth/
-├── packages/                    # Vendored Prime Agent Node workspace
-├── prime-agent-runtime/         # Vendored Python RLM runtime
-├── local_memory/                # Phase 4 ReasoningBank scaffold
-├── middleware/                  # Phase 2/3 telemetry and BATS scaffold
-├── optimizer/                   # Phase 6 AutoSaddler scaffold
-├── tests/harness_regression/    # Future D_dev regression suite
-├── scripts/fetch-refs.sh        # Fetches pinned, ignored research snapshots
-├── ARCHITECTURE_NOTES.md
-├── INTEGRATION_MAP.md
-├── DECISIONS.md
-└── pyproject.toml               # Overlay package metadata; no CLI entry yet
-```
-
-Runtime databases and generated state belong under ignored `.synth/`. Reference repositories belong under ignored `refs/`. Model weights must remain outside the repository or below `.synth/`.
-
-## Environment boundary
-
-The Node baseline uses Node 24 and npm 11:
-
-```bash
-npm install
-npm run build
-```
-
-The AI build uses its pinned model catalog and does not regenerate it from remote hosts. Phase 1 establishes the remaining local-first defaults; the branch is not fully offline-hardened until that gate is complete.
-
-Overlay Python must run through a uv-managed Python 3.12 environment. Do not use the host `python3` or an unpinned `pip` environment.
-
-Run the one-time local setup from the repository root:
+Prerequisites are Node/npm supported by the repository, `uv`, `git`, `rg`, `fd`, and `tmux`.
 
 ```bash
 scripts/setup-offline.sh
+./prime-agent.sh --offline
 ```
 
-The script installs the locked Python 3.12 overlay, provisions Prime Agent's separate Python 3.11 kernel, prefetches the local embedding model, and additively merges the tracked `local` provider into the active agent-directory `models.json`. It never replaces existing provider values or model definitions. Changed JSONC catalogs are normalized to JSON; a semantic no-op preserves the original file bytes and timestamp.
+The setup script prepares a uv-managed Python 3.12 overlay environment, the separate Prime Agent kernel environment, enabled Python-backed project skills, the pinned FastEmbed model, and a local model-catalog entry. It is idempotent and preserves conflicting user model settings.
 
-The shipped project settings select `local/local-main`. The tracked template points at `http://localhost:8000/v1`; edit the installed agent-directory catalog if the local OpenAI-compatible endpoint uses a different port or model IDs. `SYNTH_LOCAL_API_KEY` is a configuration reference, not a vendor credential; local servers that ignore authentication may use any nonempty value.
+The checked-in profile points `local-main` and `local-small` at `http://localhost:8000/v1`. Start an OpenAI-compatible local server there or update `synth.json` and the installed Prime Agent model catalog together. `SYNTH_LOCAL_API_KEY` is only a local configuration reference; servers that ignore authentication may use any nonempty value.
 
-Fetch the exact research snapshots recorded for this baseline with:
+Inside the TUI:
+
+```text
+/synth status
+/synth budget
+/synth memory list
+```
+
+The Python control surface is available through the overlay environment:
+
+```bash
+uv run --project . --no-sync synth status
+uv run --project . --no-sync synth memory search "similar repair task"
+uv run --project . --no-sync synth run --task "fix the seeded bug" --bats
+```
+
+## Credential-free acceptance demo
+
+From a clean exact commit:
+
+```bash
+scripts/synth-demo.sh
+```
+
+The demo uses the faux provider to prove the complete loop: one task fails, its lesson is distilled and retrieved by the next session, BATS budgets and enforcement appear in the persisted transcript, strategic verification pivots a failing attempt, AutoSaddler creates a regression-free gated commit on its own optimizer branch, and the compiler generates, rejects or promotes, reloads, and invokes a tested skill. It also performs real TUI and print-mode boot proofs and the bounded Phase 8 failure injections.
+
+The demo never switches or modifies the source worktree, but it deliberately leaves ignored run evidence under `.synth/optimizer-runs/` and a local `synth/optimizer/*` commit as acceptance receipts.
+
+## Architecture and operations
+
+- [Architecture](docs/synth/architecture.md)
+- [Generated configuration reference](docs/synth/config.md)
+- [Operator runbook](docs/synth/runbook.md)
+- [Verified Prime Agent anchors](ARCHITECTURE_NOTES.md)
+- [Capability-to-hook integration map](INTEGRATION_MAP.md)
+- [Append-only implementation decisions](DECISIONS.md)
+
+The two runtime heads are `.prime/agent/extensions/synth/index.ts` and the `synth` CLI entry in `synth/cli.py`. `scripts/check-wiring.sh` rejects unreachable overlay TypeScript or Python modules.
+
+Runtime self-modification is confined to `.prime/agent/skills/`, native HarnessState, Synth SQLite state, and `.synth/`. The extension’s tool guard and the compiler’s static gate both enforce that boundary. Prime Agent packages, `prime-agent-runtime/`, the Synth extension, and overlay Python remain control-plane code and change only through normal development or a gated offline optimizer branch.
+
+## Repository layout
+
+```text
+.prime/agent/extensions/synth/   TypeScript runtime extension
+.prime/agent/skills/             trusted project skills and compiler promotions
+synth/                           Python CLI and JSON-lines bridge service
+local_memory/                    ReasoningBank storage, retrieval, judge, distillation
+middleware/                      telemetry schema and BATS budget math
+optimizer/                       AutoSaddler v2 vendor plus Synth scenario adapter
+compiler/                        skill generation, audit, promotion, and deterministic gate
+tests/harness_regression/        cross-phase deterministic regression suite
+tests/harness_tasks/             disjoint optimizer training and development fixtures
+scripts/synth-demo.sh            full-loop acceptance proof
+```
+
+Runtime databases, telemetry, candidates, quarantine, audit logs, and optimizer runs belong under ignored `.synth/`. Research snapshots belong under ignored `refs/`. Never commit those paths, model weights, or native session data.
+
+Overlay Python commands must use the uv-managed environment; do not use the host Python. Fetch the pinned research snapshots for fidelity audit with:
 
 ```bash
 scripts/fetch-refs.sh
 ```
 
-See `packages/coding-agent/docs/` for the vendored Prime Agent architecture and usage documentation.
+Vendored Prime Agent documentation remains under `packages/coding-agent/docs/`.
