@@ -64,19 +64,19 @@ MAX_MEMORY_ITEMS = 3
 INSTRUCTION_AWARE_QUERY_FORMAT = "Instruct: {task_description}\nQuery: {query}"
 
 
-# Source: reasoning-bank | WebArena/autoeval/prompts.py:111-133 | commit ed80611 | PORTED (verbatim).
-AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT = '''You are an expert in evaluating the performance of a web navigation agent. The agent is designed to help a human user navigate a website to complete a task. Given the user's intent, the agent's action history, the final state of the webpage, and the agent's response to the user, your goal is to decide whether the agent's execution is successful or not.
+# Source: reasoning-bank | WebArena/autoeval/prompts.py:111-133 | commit ed80611 | ADAPTED (software-engineering evidence categories).
+AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT = '''You are an expert in evaluating the performance of a software engineering agent. The agent is designed to help a human user inspect and modify a code repository. Given the user's intent, the agent's action history, the final observed repository and verification state, and the agent's response to the user, your goal is to decide whether the agent's execution is successful or not.
 
 There are three types of tasks:
-1. Information seeking: The user wants to obtain certain information from the webpage, such as the information of a product, reviews, map info, comparison of map routes, etc. The bot's response must contain the information the user wants, or explicitly state that the information is not available. Otherwise, e.g. the bot encounters an exception and respond with the error content, the task is considered a failure. Besides, be careful about the sufficiency of the agent's actions. For example, when asked to list the top-searched items in a shop, the agent should order the items by the number of searches, and then return the top items. If the ordering action is missing, the task is likely to fail.
-2. Site navigation: The user wants to navigate to a specific page. Carefully examine the bot's action history and the final state of the webpage to determine whether the bot successfully completes the task. No need to consider the bot's response.
-3. Content modification: The user wants to modify the content of a webpage or configuration. Carefully examine the bot's action history and the final state of the webpage to determine whether the bot successfully completes the task. No need to consider the bot's response.
+1. Information seeking: The user wants to obtain information from the repository, runtime, documentation, or tests. The agent's response must contain the requested information, or explicitly state that the information is not available. An exception or ungrounded guess is a failure. Be careful about sufficiency: if the task asks for an exhaustive result, the agent must inspect the complete relevant surface rather than a convenient subset.
+2. Repository navigation and diagnosis: The user wants to locate, explain, or diagnose a specific behavior. Carefully examine the action history and observed evidence to determine whether the agent identified the correct code path and cause. A plausible explanation without evidence from the named system is a failure.
+3. Content modification: The user wants to modify code, configuration, tests, or documentation. Carefully examine the action history, final diff, and test/build evidence to determine whether every requested change was completed without regressions. A claimed change without verification evidence is not sufficient.
 
 *Strictness rules*
 Before calling a task successful, verify all three:
 - Completeness: every constraint in the intent is satisfied, and if the task implies an exhaustive result (a list, a range, an aggregate), the agent inspected the full source, not just the first page.
-- Grounding: every value, name, or URL the agent reports is traceable to a specific observation; values that were inferred, guessed, or summarized without a visible source count as failures.
-- Right target: when the task names a specific entity (a particular order, category, filter, product), confirm the agent acted on that exact entity and not an adjacent one.
+- Grounding: every factual claim, path, result, or reported behavior is traceable to a specific repository or runtime observation; inferred or guessed values without visible evidence count as failures.
+- Right target: when the task names a specific package, file, interface, behavior, or acceptance criterion, confirm the agent acted on that exact target and not an adjacent one.
 When uncertain on any of these, mark failure. A false success is more harmful than a false failure, because memory induction amplifies it into future behavior.
 
 *IMPORTANT*
@@ -86,20 +86,20 @@ Thoughts: <your thoughts and reasoning process>"
 Status: "success" or "failure"'''
 
 
-# Source: reasoning-bank | WebArena/autoeval/prompts.py:134-146 | commit ed80611 | PORTED (verbatim).
+# Source: reasoning-bank | WebArena/autoeval/prompts.py:134-146 | commit ed80611 | ADAPTED (repository trajectory fields).
 # The source f-string's runtime values are exposed as named format placeholders; callers supply "N/A" for an absent response.
 AUTOEVAL_TRAJECTORY_JUDGE_PROMPT = """User Intent: {intent}
 
 Action History:
 {last_actions}
 
-The detailed final state of the webpage:
+The detailed final observed state of the repository and verification evidence:
 
 ```md
 {cap}
 ```
 
-Bot response to the user: {response}."""
+Agent response to the user: {response}."""
 
 
 # Source: reasoning-bank | WebArena/autoeval/prompts.py:128-133; WebArena/autoeval/evaluator.py:94-97 | commit ed80611 | PORTED (verbatim).

@@ -246,3 +246,31 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Retain the kickoff's broader ceremony; duplicate reviewed engines on `synth/dev`; keep Phase 3 prompt goldens and a separate schema parity suite.
 - Why: The operator explicitly superseded conflicting kickoff ceremony and assigned reviewed, disjoint implementation lanes. Removing duplicate checks and engines keeps the work focused on executable product paths while preserving the phase demos, `npm run check`, existing regressions, boot proofs, host classifier, two-head wiring, and per-gate push/report cadence.
 - Affected files: `DECISIONS.md`, Phase 3 tests and demo, future Phase 4/5/7 scope, and all remaining gate reports.
+
+## 2026-08-26 — D-0036: Retrieve individual local memory items and keep them distinct from HarnessState
+
+- Decision: Index and retrieve individual Title/Description/Content items with local BGE-small embeddings and sqlite-vec cosine similarity, using the canonical instruction-aware query `Instruct: {task}\nQuery: {query}`. The task description names prior software-engineering memories rather than prior query records. Inject only `strategy` items under `## Lessons from past sessions`, render explicit `success`/`fail` provenance, and persist the exact rendered section in a non-context `synth.memory.retrieval` entry. ReasoningBank does not write native HarnessState; Phase 7 reserves `meta_heuristic` items for a separate `## Problem framing` section.
+- Alternatives: Reproduce query-record retrieval with Gemini/Qwen embeddings and 3072 dimensions; inject task/session provenance or force explicit discussion of every lesson; copy auto-distilled items into HarnessState.
+- Why: Synth's required schema stores each lesson as an independently searchable row and its prepared local model is 384-dimensional BGE-small. Item-level top-k and normalized cosine scores preserve the research retrieval mechanism while the distinct heading and durable non-context receipt prevent auto-distilled memory from masquerading as curated harness state or duplicating prompt context.
+- Affected files: `local_memory/retrieval.py`, `local_memory/store.py`, `synth/config.py`, `synth/service.py`, `.prime/agent/extensions/synth/memory.ts`, `.prime/agent/extensions/synth/index.ts`.
+
+## 2026-08-26 — D-0037: Adapt the WebArena judge to repository evidence and fail closed on its response contract
+
+- Decision: Preserve the ReasoningBank judge's intent/history/final-state/final-response structure and two-line Thoughts/Status result, but translate WebArena categories to repository inspection, diagnosis, modification, and test/build/diff evidence. Native `agent_status.taskState` and an externally supplied print exit code remain context-only priors. Parsing requires exactly two nonempty lines; extra prose is rejected rather than guessed.
+- Alternatives: Run the web-navigation wording unchanged; let native task state or exit code decide correctness; scan a verbose response for the last status token.
+- Why: Webpage, URL, and product criteria would misjudge coding trajectories, while the research contribution is independent LLM correctness judgment over observed evidence. Strict parsing prevents an ambiguous local-model response from being distilled into durable epistemic memory.
+- Affected files: `local_memory/prompts_reasoning_bank.py`, `local_memory/judge.py`, `synth/model.py`, `synth/session.py`, `synth/reasoning_bank.py`, `synth/cli.py`.
+
+## 2026-08-26 — D-0038: Enqueue shutdown distillation as a detached local CLI job
+
+- Decision: On meaningful non-reload shutdowns, close the session bridge and spawn `uv run --project <cwd> --no-sync synth distill <session>` detached with ignored stdio. The hook records an extension-owned telemetry enqueue receipt and never awaits judging, model inference, embedding, or SQLite. The child waits for a stable v3 JSONL file, walks only its active parent chain, and uses semantic deduplication on retries. Interactive sessions pass no exit-code prior because none is persisted. Faux demos select deterministic judge/distill responses only through an explicit fixture path.
+- Alternatives: Send a fire-and-forget request through the bridge and immediately close it; block shutdown until distillation completes; infer success from the final assistant or task state; require a new daemon queue protocol.
+- Why: Closing a bridge rejects pending requests, and model/database latency cannot be placed on session teardown. The detached CLI is reachable from the sole Python head, inherits the prepared offline environment, degrades without breaking the agent, and keeps test fixtures out of production model selection.
+- Affected files: `.prime/agent/extensions/synth/index.ts`, `synth/model.py`, `synth/session.py`, `synth/reasoning_bank.py`, `synth/cli.py`, Phase 4 demo and telemetry evidence.
+
+## 2026-08-26 — D-0039: Defer MaTTS scaling until the core ReasoningBank gate is stable
+
+- Decision: Phase 4 omits MaTTS parallel trajectories, contrast distillation, and sequential re-verification. Its reviewed prompt constants remain unreachable research references until the Phase 4 core gate and later batch infrastructure are complete.
+- Alternatives: Add `synth matts -k N` before completing two-session retrieval and shutdown distillation; delete the reviewed stretch prompt constants.
+- Why: The phase marks MaTTS as stretch-only, and standing directive v5 limits this lane to product wiring around the reviewed store. Phase 5 already owns fresh-trajectory batch scaling and is the coherent place to revisit parallel contrast induction.
+- Affected files: `local_memory/prompts_reasoning_bank.py`, Phase 4 report, future Phase 5/ReasoningBank integration notes.

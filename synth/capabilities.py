@@ -20,11 +20,10 @@ TELEMETRY_CAPABILITY = CapabilityStatus(
 )
 REASONING_BANK_CAPABILITY = CapabilityStatus(
     name="reasoning_bank",
-    available=False,
+    available=True,
     planned_phase=4,
     detail=(
-        "Wire contracts exist; storage, retrieval, judging, and distillation land "
-        "in Phase 4."
+        "Local storage, retrieval, judgment, and nonblocking session distillation."
     ),
 )
 

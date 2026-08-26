@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { BridgeClient, BridgeRequestError } from "./bridge.js";
+import { BridgeClient } from "./bridge.js";
 import {
 	assistantStalled,
 	BATS_CONTINUATION_NUDGE,
@@ -17,6 +18,15 @@ import {
 } from "./budget.js";
 import { loadSynthConfig, resolveDataPlanePath, type SynthConfig, type SynthConfigLoadResult } from "./config.js";
 import { controlPlaneBlockReason } from "./guard.js";
+import {
+	LESSONS_HEADING,
+	parseMemoryItems,
+	parsePersistedMemoryRetrieval,
+	REASONING_BANK_TASK_DESCRIPTION,
+	renderLessons,
+	renderMemoryList,
+	renderMemorySearch,
+} from "./memory.js";
 import {
 	type BudgetSnapshot,
 	copyUsage,
@@ -59,6 +69,12 @@ interface SessionRuntime {
 	allowedToolCallsThisTurn: number;
 	noToolCount: number;
 	nudgePending: boolean;
+	taskQuery?: string;
+	memoryLookup?: Promise<void>;
+	memorySection?: string;
+	memoryItemIds: number[];
+	memoryPersisted: boolean;
+	distillEnqueued: boolean;
 }
 
 function errorMessage(error: unknown): string {
@@ -114,6 +130,9 @@ function createRuntime(cwd: string): SessionRuntime {
 		allowedToolCallsThisTurn: 0,
 		noToolCount: 0,
 		nudgePending: false,
+		memoryItemIds: [],
+		memoryPersisted: false,
+		distillEnqueued: false,
 	};
 }
 
@@ -219,6 +238,39 @@ function firstProviderWithoutStatus(runtime: SessionRuntime): ProviderExchange |
 	return undefined;
 }
 
+function restorePersistedMemory(runtime: SessionRuntime, ctx: ExtensionContext): void {
+	const branch = ctx.sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "custom" || entry.customType !== "synth.memory.retrieval") {
+			continue;
+		}
+		const persisted = parsePersistedMemoryRetrieval(entry.data);
+		if (!persisted) {
+			continue;
+		}
+		runtime.taskQuery = persisted.taskQuery;
+		runtime.memorySection = persisted.section;
+		runtime.memoryItemIds = persisted.itemIds;
+		runtime.memoryPersisted = true;
+		runtime.memoryLookup = Promise.resolve();
+		return;
+	}
+}
+
+function hasMeaningfulTrajectory(ctx: ExtensionContext): boolean {
+	let hasUser = false;
+	let hasAssistant = false;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message") {
+			continue;
+		}
+		hasUser ||= entry.message.role === "user";
+		hasAssistant ||= entry.message.role === "assistant";
+	}
+	return hasUser && hasAssistant;
+}
+
 export default function synthExtension(pi: ExtensionAPI): void {
 	const runtimes = new WeakMap<object, SessionRuntime>();
 
@@ -295,6 +347,123 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		return runtime.bridge;
 	}
 
+	async function loadMemoryForTask(runtime: SessionRuntime, ctx: ExtensionContext, taskQuery: string): Promise<void> {
+		const config = runtime.configLoad.config;
+		if (!config?.memory.enabled || config.killSwitch.all) {
+			return;
+		}
+		if (!runtime.taskQuery) {
+			runtime.taskQuery = taskQuery.trim();
+		}
+		if (!runtime.taskQuery || runtime.memoryLookup) {
+			await runtime.memoryLookup;
+			return;
+		}
+		const client = bridgeFor(runtime, ctx);
+		if (!client) {
+			return;
+		}
+		runtime.memoryLookup = (async () => {
+			try {
+				const response = await client.request("memory.query", {
+					query: runtime.taskQuery,
+					taskDescription: REASONING_BANK_TASK_DESCRIPTION,
+					k: config.memory.k,
+					minScore: config.memory.minScore,
+					statuses: ["success", "fail"],
+					itemTypes: ["strategy"],
+				});
+				const items = parseMemoryItems(response, true);
+				const section = renderLessons(items);
+				if (!section) {
+					return;
+				}
+				runtime.memorySection = section;
+				runtime.memoryItemIds = items.map((item) => item.id);
+				if (!runtime.memoryPersisted) {
+					pi.appendEntry("synth.memory.retrieval", {
+						taskQuery: runtime.taskQuery,
+						section,
+						itemIds: runtime.memoryItemIds,
+						timestamp: Date.now(),
+					});
+					runtime.memoryPersisted = true;
+				}
+				const pointer = transcript(ctx);
+				appendTelemetry(runtime, ctx, {
+					sessionId: ctx.sessionManager.getSessionId(),
+					kind: "bridge",
+					...(pointer ? { transcript: pointer } : {}),
+					data: { action: "memory.retrieved", itemIds: runtime.memoryItemIds },
+				});
+			} catch (error) {
+				warn(runtime, ctx, "memory", `ReasoningBank retrieval unavailable; continuing without lessons: ${errorMessage(error)}`);
+				const pointer = transcript(ctx);
+				appendTelemetry(runtime, ctx, {
+					sessionId: ctx.sessionManager.getSessionId(),
+					kind: "bridge",
+					...(pointer ? { transcript: pointer } : {}),
+					errorClass: "MemoryRetrievalUnavailable",
+					data: { action: "memory.retrieval_failed" },
+				});
+			}
+		})();
+		await runtime.memoryLookup;
+	}
+
+	function enqueueDistillation(runtime: SessionRuntime, ctx: ExtensionContext, reason: string): void {
+		const config = runtime.configLoad.config;
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		if (
+			runtime.distillEnqueued ||
+			reason === "reload" ||
+			!config?.memory.enabled ||
+			config.killSwitch.all ||
+			!runtime.taskQuery ||
+			!sessionFile ||
+			!hasMeaningfulTrajectory(ctx)
+		) {
+			return;
+		}
+		runtime.distillEnqueued = true;
+		const jobId = randomUUID();
+		const args = ["run", "--project", ctx.cwd, "--no-sync", "synth", "distill", sessionFile];
+		const fixture = process.env.SYNTH_MEMORY_FIXTURE;
+		if (fixture) {
+			args.push("--fixture", fixture);
+		}
+		try {
+			const child = spawn("uv", args, {
+				cwd: ctx.cwd,
+				detached: true,
+				env: { ...process.env, UV_NO_PROGRESS: "1" },
+				stdio: "ignore",
+			});
+			child.once("error", (error) => {
+				if (!runtime.warnings.has("memory-distill")) {
+					runtime.warnings.add("memory-distill");
+					console.error(`synth: ReasoningBank distillation did not start: ${error.message}`);
+				}
+			});
+			child.unref();
+			const pointer = transcript(ctx);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "bridge",
+				...(pointer ? { transcript: pointer } : {}),
+				data: {
+					action: "memory.distill_enqueued",
+					jobId,
+					pid: child.pid ?? null,
+					reason,
+					sessionFile,
+				},
+			});
+		} catch (error) {
+			warn(runtime, ctx, "memory-distill", `ReasoningBank distillation did not start: ${errorMessage(error)}`);
+		}
+	}
+
 	async function statusText(runtime: SessionRuntime, ctx: ExtensionCommandContext): Promise<string> {
 		const configLoad = runtime.configLoad;
 		if (configLoad.state === "absent") {
@@ -332,28 +501,29 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.configLoad.state !== "loaded" || !config || !config.memory.enabled) {
 			return "Synth memory is off.";
 		}
-		const query = args.trim();
-		if (!query) {
-			return "Usage: /synth memory <query>";
-		}
 		const client = bridgeFor(runtime, ctx);
 		if (!client) {
 			return "Synth memory bridge is unavailable.";
 		}
+		const [operation = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 		try {
-			const result = await client.request("memory.query", {
-				query,
-				taskDescription: "Resolve a software engineering task in a repository",
-				k: config.memory.k,
-				minScore: config.memory.minScore,
-				statuses: ["success", "fail"],
-				itemTypes: ["strategy", "meta_heuristic"],
-			});
-			return `Synth memory\n${JSON.stringify(result, null, 2)}`;
-		} catch (error) {
-			if (error instanceof BridgeRequestError && error.code === "feature_disabled") {
-				return `Synth memory pending Phase 4: ${error.message}`;
+			if (operation === "list" && rest.length === 0) {
+				return renderMemoryList(parseMemoryItems(await client.request("memory.list", { limit: 50 }), false));
 			}
+			if (operation === "search" && rest.length > 0) {
+				const query = rest.join(" ");
+				const result = await client.request("memory.query", {
+					query,
+					taskDescription: REASONING_BANK_TASK_DESCRIPTION,
+					k: config.memory.k,
+					minScore: config.memory.minScore,
+					statuses: ["success", "fail"],
+					itemTypes: ["strategy"],
+				});
+				return renderMemorySearch(query, parseMemoryItems(result, true));
+			}
+			return "Usage: /synth memory [list|search <query>]";
+		} catch (error) {
 			return `Synth memory unavailable: ${errorMessage(error)}`;
 		}
 	}
@@ -361,7 +531,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("synth", {
 		description: "Show Synth status, memory, or budget state",
 		getArgumentCompletions: (prefix) => {
-			const commands = ["status", "memory", "budget"];
+			const commands = ["status", "memory list", "memory search ", "budget"];
 			const matches = commands.filter((command) => command.startsWith(prefix));
 			return matches.length > 0 ? matches.map((command) => ({ value: command, label: command })) : null;
 		},
@@ -388,7 +558,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			commandOutput(pi, "Usage: /synth [status|memory <query>|budget]");
+			commandOutput(pi, "Usage: /synth [status|memory list|memory search <query>|budget]");
 		},
 	});
 
@@ -403,6 +573,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.configLoad.state !== "loaded" || !config || config.killSwitch.all) {
 			return;
 		}
+		restorePersistedMemory(runtime, ctx);
 		runtime.initialBudgetInjected = ctx.sessionManager
 			.getBranch()
 			.some((entry) => entry.type === "message" && messageContains(entry.message, "<budget>"));
@@ -449,6 +620,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { reason: event.reason },
 		});
 		await runtime.bridge?.close();
+		enqueueDistillation(runtime, ctx, event.reason);
 		runtimes.delete(ctx.sessionManager);
 	});
 
@@ -467,12 +639,18 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("before_agent_start", (event, ctx) => {
-		const budget = runtimeFor(ctx).budget;
-		if (!budget) {
-			return undefined;
-		}
-		return { systemPrompt: injectBatsSystemPrompt(event.systemPrompt, budget.snapshot()) };
+	pi.on("before_agent_start", async (event, ctx) => {
+		const runtime = runtimeFor(ctx);
+		const systemPrompt = runtime.budget
+			? injectBatsSystemPrompt(event.systemPrompt, runtime.budget.snapshot())
+			: event.systemPrompt;
+		await loadMemoryForTask(runtime, ctx, event.prompt);
+		const memorySection = runtime.memorySection;
+		const combined =
+			memorySection && !systemPrompt.includes(LESSONS_HEADING)
+				? `${systemPrompt.trimEnd()}\n\n${memorySection}`
+				: systemPrompt;
+		return combined === event.systemPrompt ? undefined : { systemPrompt: combined };
 	});
 
 	pi.on("context", (event, ctx) => {

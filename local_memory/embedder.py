@@ -28,8 +28,10 @@ class EmbeddingBatch:
 class LocalEmbedder:
     """Load FastEmbed only on first use and never download from a runtime request."""
 
-    def __init__(self, workspace: Path) -> None:
-        self._model_name = os.environ.get("SYNTH_EMBED_MODEL", DEFAULT_EMBED_MODEL)
+    def __init__(self, workspace: Path, *, model_name: str | None = None) -> None:
+        self._model_name = model_name or os.environ.get(
+            "SYNTH_EMBED_MODEL", DEFAULT_EMBED_MODEL
+        )
         configured_cache = os.environ.get("SYNTH_FASTEMBED_CACHE_DIR")
         self._cache_dir = (
             Path(configured_cache).expanduser().resolve()
