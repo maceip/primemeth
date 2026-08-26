@@ -2,11 +2,21 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+interface MockZipEntry {
+	fileName: string;
+	externalFileAttributes: number;
+}
+
+interface MockExtractZipOptions {
+	dir: string;
+	onEntry?: (entry: MockZipEntry) => void;
+}
+
 const toolState = vi.hoisted(() => ({
 	toolsDir: `/tmp/prime-agent-tools-manager-${process.pid}`,
 	platform: "linux",
 	architecture: "x64",
-	extractZip: async (_source: string, _options: { dir: string }): Promise<void> => {},
+	extractZip: async (_source: string, _options: MockExtractZipOptions): Promise<void> => {},
 }));
 
 vi.mock("../src/config.js", () => ({
@@ -20,7 +30,7 @@ vi.mock("os", () => ({
 }));
 
 vi.mock("extract-zip", () => ({
-	default: (source: string, options: { dir: string }) => toolState.extractZip(source, options),
+	default: (source: string, options: MockExtractZipOptions) => toolState.extractZip(source, options),
 }));
 
 import {
@@ -130,6 +140,10 @@ describe("tools manager", () => {
 			.mockResolvedValueOnce(new Response(new Uint8Array([1]), { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
 		toolState.extractZip = async (_source, options) => {
+			options.onEntry?.({
+				fileName: "ripgrep-15.1.0-x86_64-pc-windows-msvc/rg.exe",
+				externalFileAttributes: (0o100755 << 16) >>> 0,
+			});
 			writeExecutable(join(options.dir, "rg.exe"));
 		};
 
@@ -138,6 +152,32 @@ describe("tools manager", () => {
 			path: join(toolState.toolsDir, "rg.exe"),
 		});
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("rejects symbolic links before extracting Windows ZIP assets", async () => {
+		toolState.platform = "win32";
+		const escapedPath = join(toolState.toolsDir, "escaped.exe");
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockResolvedValueOnce(new Response(JSON.stringify({ tag_name: "15.1.0" }), { status: 200 }))
+				.mockResolvedValueOnce(new Response(new Uint8Array([1]), { status: 200 })),
+		);
+		toolState.extractZip = async (_source, options) => {
+			options.onEntry?.({
+				fileName: "ripgrep-15.1.0-x86_64-pc-windows-msvc/rg.exe",
+				externalFileAttributes: (0o120777 << 16) >>> 0,
+			});
+			writeExecutable(escapedPath);
+		};
+
+		await expect(ensureToolWithStatus("rg")).resolves.toMatchObject({
+			status: "unavailable",
+			reason: "download_failed",
+			detail: expect.stringContaining("symbolic links are not permitted"),
+		});
+		expect(existsSync(escapedPath)).toBe(false);
 	});
 
 	it("removes a downloaded binary that fails its version check", async () => {

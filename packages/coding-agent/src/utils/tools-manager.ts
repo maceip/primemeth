@@ -13,6 +13,8 @@ const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 5_000;
 const RIPGREP_INSTALL_URL = "https://github.com/BurntSushi/ripgrep#installation";
+const ZIP_FILE_TYPE_MASK = 0o170000;
+const ZIP_SYMLINK_TYPE = 0o120000;
 
 export type ManagedTool = "fd" | "rg";
 
@@ -184,6 +186,13 @@ function findBinaryRecursively(rootDir: string, binaryFileName: string): string 
 	return null;
 }
 
+function rejectZipSymlink(fileName: string, externalFileAttributes: number): void {
+	const unixMode = (externalFileAttributes >>> 16) & 0xffff;
+	if ((unixMode & ZIP_FILE_TYPE_MASK) === ZIP_SYMLINK_TYPE) {
+		throw new Error(`Unsafe ZIP archive: symbolic links are not permitted (${JSON.stringify(fileName)})`);
+	}
+}
+
 // Download and install a tool
 class UnsupportedToolPlatformError extends Error {}
 
@@ -230,7 +239,10 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 				throw new Error(`Failed to extract ${assetName}: ${errMsg}`);
 			}
 		} else if (assetName.endsWith(".zip")) {
-			await extractZip(archivePath, { dir: extractDir });
+			await extractZip(archivePath, {
+				dir: extractDir,
+				onEntry: (entry) => rejectZipSymlink(entry.fileName, entry.externalFileAttributes),
+			});
 		} else {
 			throw new Error(`Unsupported archive format: ${assetName}`);
 		}

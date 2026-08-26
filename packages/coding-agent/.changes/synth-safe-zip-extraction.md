@@ -1,0 +1,1 @@
+- Hardened Windows helper ZIP extraction by rejecting symbolic-link entries before they can escape the temporary directory.
