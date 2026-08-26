@@ -46,7 +46,12 @@ import {
 } from "../daemon/saved-session-catalog.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
-import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
+import {
+	consumePrimeMethBootInput,
+	PrimeMethBootHeader,
+	skipPrimeMethBootAnimations,
+} from "../interactive/components/prime-meth-boot.js";
+import { InteractiveMode } from "../interactive/interactive-mode.js";
 import type { InteractiveModeUiServices } from "../interactive/interactive-mode-services.js";
 import { ClientPromptStashStore } from "../interactive/prompt-stash-state.js";
 import {
@@ -128,6 +133,8 @@ export interface AgentsViewModeOptions {
 	initialSession?: SessionSummary;
 	/** When set, the first view is rooted at this session's direct children. */
 	initialScopeKey?: AgentsViewScopeKey;
+	/** Suppress animation when this view follows an already-rendered chat. */
+	suppressPrimeMethBootAnimation?: boolean;
 }
 
 export type AgentsViewRunResult =
@@ -170,6 +177,7 @@ export type AgentsViewPersistentState = {
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
 	heartbeats?: AgentConnectionHeartbeat[];
+	primeMethBootShown?: boolean;
 };
 
 type PromptCommand = Extract<DaemonCommand, { type: "prompt" }>;
@@ -270,10 +278,11 @@ export function createInitialAgentsViewScopeFrames(
 }
 
 export function createInitialAgentsViewPersistentState(
-	options: Pick<AgentsViewModeOptions, "initialScopeKey" | "initialSession">,
+	options: Pick<AgentsViewModeOptions, "initialScopeKey" | "initialSession" | "suppressPrimeMethBootAnimation">,
 ): AgentsViewPersistentState {
 	const initialSession = options.initialSession;
 	return {
+		...(options.suppressPrimeMethBootAnimation ? { primeMethBootShown: true } : {}),
 		...(initialSession
 			? {
 					selectedRowIdentity: getSummaryIdentity(initialSession),
@@ -288,6 +297,12 @@ export function createInitialAgentsViewPersistentState(
 				}
 			: {}),
 	};
+}
+
+export function claimAgentsViewPrimeMethBoot(persistentState: AgentsViewPersistentState): boolean | undefined {
+	const animationOverride = persistentState.primeMethBootShown ? false : undefined;
+	persistentState.primeMethBootShown = true;
+	return animationOverride;
 }
 
 export function createScopeBackReturnChatOpenResult(
@@ -468,6 +483,7 @@ export async function runAgentsViewMode(options: AgentsViewModeOptions): Promise
 				verbose: options.verbose,
 				returnToAgentsView: true,
 				forceFullscreen: true,
+				animatePrimeMethBoot: false,
 				// The agents view renders the global notices itself, so suppress them in-session.
 				agentsViewOwnsStartupNotices: true,
 				sessionDepth: opened.summary.rlmDepth,
@@ -619,9 +635,10 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private readonly ui: TUI;
 	private readonly editor: CustomEditor;
-	private readonly splash: BrandSplashHeader;
+	private readonly splash: PrimeMethBootHeader;
 	private readonly fullscreenDock: Component;
 	private readonly keybindings: KeybindingsManager;
+	private primeMethBootInputUnsubscribe: (() => void) | undefined;
 	private client: DaemonClient | undefined;
 	private unsubscribeClientClose: (() => void) | undefined;
 	private unsubscribeClientMessage: (() => void) | undefined;
@@ -810,13 +827,15 @@ export class AgentsViewMode implements Component, Focusable {
 				this.editor.invalidate();
 			},
 		};
-		this.splash = new BrandSplashHeader(
+		this.splash = new PrimeMethBootHeader(
 			VERSION,
 			() => this.getSplashModelId(),
 			() => this.getSplashCwd(),
-			undefined,
 			{
 				topPadding: true,
+				deferAnimation: true,
+				requestRender: () => this.ui.requestRender(),
+				onAnimationStop: () => this.clearPrimeMethBootInputListener(),
 				getExtraMetadata: () => {
 					const root = this.scopeRootSummary;
 					return [
@@ -846,6 +865,14 @@ export class AgentsViewMode implements Component, Focusable {
 			mouse: false,
 			viewportControls: false,
 		});
+		this.splash.startAnimation(claimAgentsViewPrimeMethBoot(this.persistentState));
+		if (this.splash.isAnimating()) {
+			this.primeMethBootInputUnsubscribe = this.ui.addInputListener((data) => {
+				const result = consumePrimeMethBootInput(data);
+				if (result?.consume) this.clearPrimeMethBootInputListener();
+				return result;
+			});
+		}
 		const startupStatusMessage = this.persistentState.statusMessage;
 		this.persistentState.statusMessage = undefined;
 		if (startupStatusMessage) {
@@ -879,6 +906,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (skipPrimeMethBootAnimations()) return;
 		this.clearStickyStatusMessage();
 		if (this.renameTarget) {
 			if (this.keybindings.matches(data, "tui.select.cancel")) {
@@ -938,6 +966,11 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!this.replyTarget && this.editor.getText() !== previous) {
 			this.queryChanged();
 		}
+	}
+
+	private clearPrimeMethBootInputListener(): void {
+		this.primeMethBootInputUnsubscribe?.();
+		this.primeMethBootInputUnsubscribe = undefined;
 	}
 
 	private isSearchCursorAtEnd(): boolean {
@@ -2354,6 +2387,8 @@ export class AgentsViewMode implements Component, Focusable {
 		this.clearCtrlCExitHint({ render: false });
 		this.clearDeleteConfirmation({ render: false });
 		this.setStatusMessage(undefined, { render: false });
+		this.clearPrimeMethBootInputListener();
+		this.splash.dispose();
 		this.ui.stop({
 			preserveAltScreen: result.type !== "exit",
 			flushFullscreen: false,

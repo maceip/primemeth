@@ -1,0 +1,5 @@
+{
+	"effect": "scanline-reveal",
+	"frameIntervalMs": 80,
+	"durationMs": 1920
+}

@@ -111,6 +111,12 @@ const ProviderExchangeSchema = Type.Object(
 		provider: Type.Union([Type.String(), Type.Null()]),
 		model: Type.Union([Type.String(), Type.Null()]),
 		status: Type.Integer({ minimum: 0 }),
+		ttftMs: Type.Optional(Type.Number({ minimum: 0 })),
+		generationMs: Type.Optional(Type.Number({ minimum: 0 })),
+		prefillTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+		decodeTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+		prefillTokensPerSecond: Type.Optional(Type.Number({ minimum: 0 })),
+		decodeTokensPerSecond: Type.Optional(Type.Number({ minimum: 0 })),
 	},
 	{ additionalProperties: false },
 );

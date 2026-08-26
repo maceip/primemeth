@@ -5,6 +5,8 @@ export default function registerEng4600FauxProvider(pi: ExtensionAPI): void {
 	const faux = registerFauxProvider({
 		provider: "faux",
 		models: [{ id: "faux", reasoning: false }],
+		tokensPerSecond: 20,
+		tokenSize: { min: 1, max: 1 },
 	});
 	faux.setResponses(Array.from({ length: 16 }, (_, index) => fauxAssistantMessage(`upgrade response ${index + 1}`)));
 	const apiProvider = getApiProvider(faux.api);

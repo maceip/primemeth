@@ -276,9 +276,15 @@ try {
 				event.kind === "provider" &&
 				event.provider?.provider === "faux" &&
 				event.usage !== undefined &&
+				event.provider.ttftMs !== undefined &&
+				event.provider.generationMs !== undefined &&
+				event.provider.prefillTokens === event.usage.input + event.usage.cacheWrite &&
+				event.provider.decodeTokens === Math.max(0, event.usage.output - 1) &&
+				event.provider.prefillTokensPerSecond !== undefined &&
+				event.provider.decodeTokensPerSecond !== undefined &&
 				event.transcript?.entryId,
 		),
-		"provider telemetry lacks native usage or transcript identity",
+		"provider telemetry lacks native usage, measured throughput, or transcript identity",
 	);
 	assert.equal(capturedWarnings.length, 1);
 	const sessionFile = harness.sessionManager.getSessionFile();

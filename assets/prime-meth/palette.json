@@ -1,0 +1,5 @@
+{
+	"name": "c64-blue-raster",
+	"truecolor": ["#b9e6ff", "#86cfff", "#55a9f2", "#347bd6", "#2452ad", "#172f78", "#0d194a"],
+	"ansiFallback": 34
+}

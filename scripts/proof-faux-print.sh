@@ -27,11 +27,22 @@ proof_socket="${proof_dir}/daemon.sock"
 proof_stdout="${proof_dir}/stdout.txt"
 proof_stderr="${proof_dir}/stderr.txt"
 proof_shutdown_complete=0
-mkdir -p "${proof_agent_dir}"
+mkdir -p "${proof_agent_dir}" "${proof_dir}/xdg-cache" "${proof_dir}/xdg-config" "${proof_dir}/xdg-data"
 
 proof_environment=(
+	"PATH=${PATH}"
+	"HOME=${HOME}"
+	"SHELL=${SHELL:-/bin/sh}"
+	"TERM=${TERM:-xterm-256color}"
+	"LANG=${LANG:-C}"
+	"LC_ALL=${LC_ALL:-}"
+	"LC_CTYPE=${LC_CTYPE:-}"
 	"PRIME_AGENT_CODING_AGENT_DIR=${proof_agent_dir}"
+	"PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR=${proof_dir}/supervisor-owners"
 	"TMPDIR=${proof_dir}"
+	"XDG_CACHE_HOME=${proof_dir}/xdg-cache"
+	"XDG_CONFIG_HOME=${proof_dir}/xdg-config"
+	"XDG_DATA_HOME=${proof_dir}/xdg-data"
 	"PI_OFFLINE=1"
 	"PI_SKIP_VERSION_CHECK=1"
 	"DO_NOT_TRACK=1"
@@ -49,7 +60,7 @@ proof_environment=(
 shutdown_private_daemon() {
 	(
 		cd "${repo_root}"
-		/usr/bin/env "${proof_environment[@]}" node --input-type=module --eval '
+		/usr/bin/env -i "${proof_environment[@]}" node --input-type=module --eval '
 import { shutdownDaemonAndWait } from "./packages/coding-agent/dist/cli/daemon-launch.js";
 
 if (!(await shutdownDaemonAndWait(process.argv[1], 10_000))) {
@@ -95,11 +106,24 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 proof_process_exit=0
+
+/usr/bin/env -i "${proof_environment[@]}" node --input-type=module --eval '
+const allowed = new Set([
+  "PATH", "HOME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE",
+  "PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR",
+  "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "PI_OFFLINE",
+  "PI_SKIP_VERSION_CHECK", "DO_NOT_TRACK", "PRIME_AGENT_TELEMETRY", "HTTP_PROXY",
+  "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
+  "__CF_USER_TEXT_ENCODING",
+]);
+const unexpected = Object.keys(process.env).filter((name) => !allowed.has(name)).sort();
+if (unexpected.length > 0) throw new Error(`unexpected environment names: ${unexpected.join(", ")}`);
+'
 (
 	cd "${repo_root}"
 	/usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!\n"' \
 		60 \
-		/usr/bin/env "${proof_environment[@]}" \
+		/usr/bin/env -i "${proof_environment[@]}" \
 		node "${cli_path}" \
 			--offline \
 			--cwd "${repo_root}" \

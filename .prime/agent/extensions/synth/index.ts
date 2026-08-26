@@ -68,6 +68,11 @@ import {
 	type TelemetryEventInput,
 } from "./telemetry.js";
 import {
+	computeProviderThroughput,
+	formatProviderThroughput,
+	type ProviderThroughput,
+} from "./throughput.js";
+import {
 	appendActivePlan,
 	assistantText,
 	buildCompactionPrompt,
@@ -103,6 +108,9 @@ interface ProviderExchange {
 	provider: string | null;
 	model: string | null;
 	status?: number;
+	firstOutputAt?: number;
+	responseEndedAt?: number;
+	throughput?: ProviderThroughput;
 }
 
 interface CompilerJobPaths {
@@ -325,7 +333,7 @@ function toolCallEntryId(ctx: ExtensionContext, toolCallId: string): string | nu
 function latestProvider(runtime: SessionRuntime): ProviderExchange | undefined {
 	let result: ProviderExchange | undefined;
 	for (const provider of runtime.providers.values()) {
-		if (provider.status === undefined) {
+		if (provider.responseEndedAt === undefined) {
 			result = provider;
 		}
 	}
@@ -1424,6 +1432,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (event, ctx) => {
+		ctx.ui.setStatus("synth.performance", undefined);
 		const runtime = createRuntime(ctx.cwd);
 		runtimes.set(ctx.sessionManager, runtime);
 		const controlPlaneWarning = managedControlPlaneWarning(ctx.cwd);
@@ -1585,6 +1594,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		runtime.shuttingDown = true;
+		ctx.ui.setStatus("synth.performance", undefined);
 		persistBudget(runtime, ctx, "session_shutdown");
 		const pointer = transcript(ctx);
 		appendTelemetry(runtime, ctx, {
@@ -1668,24 +1678,40 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		return messages === event.messages ? undefined : { messages };
 	});
 
+	pi.on("message_update", (event, ctx) => {
+		const provider = latestProvider(runtimeFor(ctx));
+		if (!provider || provider.firstOutputAt !== undefined) return;
+		const update = event.assistantMessageEvent;
+		if (
+			(update.type === "text_delta" ||
+				update.type === "thinking_delta" ||
+				update.type === "toolcall_delta") &&
+			update.delta.length > 0
+		) {
+			provider.firstOutputAt = performance.now();
+		}
+	});
+
 	pi.on("message_end", (event, ctx) => {
 		const runtime = runtimeFor(ctx);
 		const budget = runtime.budget;
-		if (!budget) {
+		if (event.message.role === "assistant") {
+			const provider = latestProvider(runtime);
+			if (provider) provider.responseEndedAt = performance.now();
+			if (budget) {
+				const update = budget.addUsage(event.message.usage);
+				persistBudget(runtime, ctx, "provider_usage", {
+					regimeChanged: update.regimeChanged,
+					previousRegime: update.before.regime,
+				});
+			}
 			return undefined;
 		}
+		if (!budget) return undefined;
 		if (event.message.role === "user" && !runtime.initialBudgetInjected) {
 			runtime.initialBudgetInjected = true;
 			const message = appendBudgetToUser(event.message, budget.snapshot());
 			return message === event.message ? undefined : { message };
-		}
-		if (event.message.role === "assistant") {
-			const update = budget.addUsage(event.message.usage);
-			persistBudget(runtime, ctx, "provider_usage", {
-				regimeChanged: update.regimeChanged,
-				previousRegime: update.before.regime,
-			});
-			return undefined;
 		}
 		if (event.message.role === "toolResult") {
 			const message = appendBudgetToToolResult(event.message, budget.snapshot());
@@ -1742,11 +1768,17 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		const entryId = messageEntryId(ctx, event.message);
 		const pointer = transcript(ctx, entryId);
 		if (provider) {
+			const responseEndedAt = provider.responseEndedAt ?? completedAt;
+			provider.throughput =
+				usage && provider.firstOutputAt !== undefined
+					? computeProviderThroughput(usage, provider.startedAt, provider.firstOutputAt, responseEndedAt)
+					: undefined;
+			ctx.ui.setStatus("synth.performance", formatProviderThroughput(provider.throughput));
 			appendTelemetry(runtime, ctx, {
 				sessionId: ctx.sessionManager.getSessionId(),
 				kind: "provider",
 				turnIndex: event.turnIndex,
-				durationMs: Math.max(0, completedAt - provider.startedAt),
+				durationMs: Math.max(0, responseEndedAt - provider.startedAt),
 				...(usage ? { usage: copyUsage(usage) } : {}),
 				provider: {
 					requestId: provider.requestId,
@@ -1754,6 +1786,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 					provider: provider.provider,
 					model: provider.model,
 					status: provider.status ?? 0,
+					...(provider.throughput ?? {}),
 				},
 				...(pointer ? { transcript: pointer } : {}),
 				...(provider.status !== undefined && provider.status >= 400
@@ -1762,6 +1795,8 @@ export default function synthExtension(pi: ExtensionAPI): void {
 						? { errorClass: assistantErrorClass(event.message) }
 						: {}),
 			});
+		} else {
+			ctx.ui.setStatus("synth.performance", undefined);
 		}
 		appendTelemetry(runtime, ctx, {
 			sessionId: ctx.sessionManager.getSessionId(),
@@ -1789,6 +1824,10 @@ export default function synthExtension(pi: ExtensionAPI): void {
 				snapshot.fullyExhausted,
 			);
 		}
+	});
+
+	pi.on("model_select", (_event, ctx) => {
+		ctx.ui.setStatus("synth.performance", undefined);
 	});
 
 	pi.on("tool_result", (event, ctx) => {

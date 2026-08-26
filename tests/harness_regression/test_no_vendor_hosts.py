@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
@@ -197,3 +199,66 @@ def test_shipped_project_defaults_are_local_and_remote_features_are_off() -> Non
     urls = [value for value in string_values(shipped_config) if "://" in value]
     assert urls
     assert all(urlparse(url).hostname in LOCAL_HOSTS for url in urls)
+
+
+def test_record_demo_rejects_non_loopback_and_credentialed_urls() -> None:
+    script = ROOT / "scripts" / "record-demo.sh"
+    bad_endpoints = (
+        "http://127.0.0.1:@example.com/v1",
+        "http://localhost.example/v1",
+        "https://127.0.0.1:8000/v1",
+        "not-a-url",
+    )
+
+    for endpoint in bad_endpoints:
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "SYNTH_DEMO_MODE": "local",
+                "SYNTH_DEMO_ENDPOINT": endpoint,
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 2, (endpoint, result.stdout, result.stderr)
+        assert "endpoint must be loopback" in result.stderr
+
+
+def test_record_demo_clears_inherited_credentials_and_proxy_environment() -> None:
+    script = ROOT / "scripts" / "record-demo.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "SYNTH_DEMO_MODE": "local",
+            "SYNTH_DEMO_ENDPOINT": "http://127.0.0.1:8000/v1",
+            "SYNTH_DEMO_CHECK_ENV_ONLY": "1",
+            "HTTP_PROXY": "http://proxy.invalid:8080",
+            "HTTPS_PROXY": "http://proxy.invalid:8080",
+            "ALL_PROXY": "http://proxy.invalid:8080",
+            "http_proxy": "http://proxy.invalid:8080",
+            "https_proxy": "http://proxy.invalid:8080",
+            "all_proxy": "http://proxy.invalid:8080",
+            "NO_PROXY": "",
+            "no_proxy": "",
+            "OPENAI_API_KEY": "must-not-cross-boundary",
+            "ANTHROPIC_API_KEY": "must-not-cross-boundary",
+            "AWS_ACCESS_KEY_ID": "must-not-cross-boundary",
+            "AWS_SECRET_ACCESS_KEY": "must-not-cross-boundary",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/must/not/cross/boundary.json",
+            "SSH_AUTH_SOCK": "/must/not/cross/agent.sock",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout == "record-demo: environment isolation PASS\n"
+    assert result.stderr == ""

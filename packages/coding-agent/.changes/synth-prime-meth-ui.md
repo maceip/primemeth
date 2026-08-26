@@ -1,0 +1,2 @@
+- Added the `prime METH>` turn prompt and a disk-backed animated Prime METH startup wordmark.
+- Added a persistent model and working-directory rail with extension-supplied last-turn throughput.

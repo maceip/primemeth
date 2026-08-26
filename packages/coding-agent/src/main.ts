@@ -1394,7 +1394,11 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 		});
-		const launchAgentsView = async (initialSession?: SessionSummary, initialScopeKey?: AgentsViewScopeKey) => {
+		const launchAgentsView = async (
+			initialSession?: SessionSummary,
+			initialScopeKey?: AgentsViewScopeKey,
+			suppressPrimeMethBootAnimation = false,
+		) => {
 			await runAgentsViewMode({
 				socketPath: daemonSocketPath,
 				config: defaultSessionConfig,
@@ -1425,6 +1429,7 @@ export async function main(args: string[], options?: MainOptions) {
 				startupModelId: startupModel.model?.id,
 				initialSession,
 				initialScopeKey,
+				suppressPrimeMethBootAnimation,
 				verbose: parsed.verbose,
 			});
 		};
@@ -1514,7 +1519,7 @@ export async function main(args: string[], options?: MainOptions) {
 						activeSessionId: interactiveResult.source.activeSessionId,
 					}
 				: undefined;
-		await launchAgentsView(returnedSummary, initialScopeKey);
+		await launchAgentsView(returnedSummary, initialScopeKey, true);
 		return;
 	}
 	if (useDaemonClient) {

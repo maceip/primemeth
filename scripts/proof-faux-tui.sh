@@ -3,8 +3,10 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-cli_path="${repo_root}/packages/coding-agent/dist/cli.js"
+cli_path="${repo_root}/packages/coding-agent/dist/bundle/cli.js"
 fixture_path="${repo_root}/packages/coding-agent/test/fixtures/eng-4600-faux-extension.ts"
+evidence_root="${SYNTH_TUI_EVIDENCE_DIR:-${repo_root}/.synth/evidence/item4}"
+proof_prompt="${SYNTH_TUI_PROMPT:-Report the active Synth budget in one concise sentence.}"
 
 for required_command in fd node rg tmux; do
 	if ! command -v "${required_command}" >/dev/null 2>&1; then
@@ -27,11 +29,23 @@ proof_socket="${proof_dir}/daemon.sock"
 proof_session="synth-proof-faux-tui-$$-${RANDOM}"
 proof_session_owned=0
 proof_shutdown_complete=0
-mkdir -p "${proof_agent_dir}"
+mkdir -p "${proof_agent_dir}" "${proof_dir}/xdg-cache" "${proof_dir}/xdg-config" "${proof_dir}/xdg-data"
 
 proof_environment=(
+	"PATH=${PATH}"
+	"HOME=${HOME}"
+	"SHELL=${SHELL:-/bin/sh}"
+	"TERM=${TERM:-xterm-256color}"
+	"COLORTERM=truecolor"
+	"LANG=${LANG:-C}"
+	"LC_ALL=${LC_ALL:-}"
+	"LC_CTYPE=${LC_CTYPE:-}"
 	"PRIME_AGENT_CODING_AGENT_DIR=${proof_agent_dir}"
+	"PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR=${proof_dir}/supervisor-owners"
 	"TMPDIR=${proof_dir}"
+	"XDG_CACHE_HOME=${proof_dir}/xdg-cache"
+	"XDG_CONFIG_HOME=${proof_dir}/xdg-config"
+	"XDG_DATA_HOME=${proof_dir}/xdg-data"
 	"PI_OFFLINE=1"
 	"PI_SKIP_VERSION_CHECK=1"
 	"DO_NOT_TRACK=1"
@@ -49,7 +63,7 @@ proof_environment=(
 shutdown_private_daemon() {
 	(
 		cd "${repo_root}"
-		/usr/bin/env "${proof_environment[@]}" node --input-type=module --eval '
+		/usr/bin/env -i "${proof_environment[@]}" node --input-type=module --eval '
 import { shutdownDaemonAndWait } from "./packages/coding-agent/dist/cli/daemon-launch.js";
 
 if (!(await shutdownDaemonAndWait(process.argv[1], 10_000))) {
@@ -97,8 +111,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+/usr/bin/env -i "${proof_environment[@]}" node --input-type=module --eval '
+const allowed = new Set([
+  "PATH", "HOME", "SHELL", "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE",
+  "PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR",
+  "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "PI_OFFLINE",
+  "PI_SKIP_VERSION_CHECK", "DO_NOT_TRACK", "PRIME_AGENT_TELEMETRY", "HTTP_PROXY",
+  "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
+  "__CF_USER_TEXT_ENCODING",
+]);
+const unexpected = Object.keys(process.env).filter((name) => !allowed.has(name)).sort();
+if (unexpected.length > 0) throw new Error(`unexpected environment names: ${unexpected.join(", ")}`);
+'
+
 printf -v proof_command '%q ' \
-	/usr/bin/env \
+	/usr/bin/env -i \
 	"${proof_environment[@]}" \
 	node "${cli_path}" \
 	--offline \
@@ -114,7 +141,7 @@ printf -v proof_command '%q ' \
 	--no-session
 proof_command+='; proof_tui_exit_code=$?; printf '\''\n%s:%s\n'\'' '\''__SYNTH_TUI_EXIT__'\'' "${proof_tui_exit_code}"'
 
-proof_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${proof_session}" -c "${repo_root}" -x 80 -y 24 /bin/bash --noprofile --norc)"
+proof_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${proof_session}" -c "${repo_root}" -x 80 -y 48 /bin/bash --noprofile --norc)"
 proof_session_owned=1
 tmux send-keys -t "${proof_pane}" -l "${proof_command}"
 tmux send-keys -t "${proof_pane}" Enter
@@ -149,6 +176,68 @@ if [[ ! -S "${proof_socket}" ]]; then
 	exit 1
 fi
 
+proof_evidence_dir="${evidence_root}/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "${proof_evidence_dir}"
+tmux capture-pane -t "${proof_pane}" -p >"${proof_evidence_dir}/boot.txt"
+tmux capture-pane -t "${proof_pane}" -p -e >"${proof_evidence_dir}/boot.ansi.txt"
+if ! grep -Fq 'Prime METH' "${proof_evidence_dir}/boot.txt" || \
+	! grep -Fq 'prime METH>' "${proof_evidence_dir}/boot.txt"; then
+	printf 'proof-faux-tui: branded boot or prompt missing from capture\n' >&2
+	exit 1
+fi
+
+# Any key skips the boot animation and is consumed. Escape is also harmless if
+# the animation completed between readiness detection and this input.
+tmux send-keys -t "${proof_pane}" Escape
+sleep 0.2
+tmux send-keys -t "${proof_pane}" -l '/synth budget'
+tmux send-keys -t "${proof_pane}" Enter
+proof_budget_ready=0
+for ((proof_attempt = 0; proof_attempt < 80; proof_attempt++)); do
+	proof_capture="$(tmux capture-pane -t "${proof_pane}" -p -S -)"
+	if grep -Fq '<budget>' <<<"${proof_capture}"; then
+		proof_budget_ready=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${proof_budget_ready}" -ne 1 ]]; then
+	printf '%s\n' "${proof_capture}" >&2
+	printf 'proof-faux-tui: /synth budget did not render the budget block\n' >&2
+	exit 1
+fi
+tmux capture-pane -t "${proof_pane}" -p -S - >"${proof_evidence_dir}/budget.txt"
+tmux capture-pane -t "${proof_pane}" -p -e -S - >"${proof_evidence_dir}/budget.ansi.txt"
+tmux send-keys -t "${proof_pane}" -l "${proof_prompt}"
+tmux send-keys -t "${proof_pane}" Enter
+proof_turn_ready=0
+for ((proof_attempt = 0; proof_attempt < 240; proof_attempt++)); do
+	proof_capture="$(tmux capture-pane -t "${proof_pane}" -p -S -)"
+	if grep -Fq 'upgrade response 1' <<<"${proof_capture}" && \
+		grep -Eq 'prefill[[:space:]]+[0-9,.]+[[:space:]]+tok/s.*decode[[:space:]]+[0-9,.]+[[:space:]]+tok/s' <<<"${proof_capture}"; then
+		proof_turn_ready=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${proof_turn_ready}" -ne 1 ]]; then
+	printf '%s\n' "${proof_capture}" >&2
+	printf 'proof-faux-tui: faux turn did not populate both throughput rates\n' >&2
+	exit 1
+fi
+proof_prompt_marker="${proof_prompt:0:32}"
+if ! grep -Fq "${proof_prompt_marker}" <<<"${proof_capture}" || \
+	! grep -Fq '<budget>' "${proof_evidence_dir}/budget.txt" || \
+	! grep -Fq '</budget>' "${proof_evidence_dir}/budget.txt"; then
+	printf '%s\n' "${proof_capture}" >&2
+	printf 'proof-faux-tui: task prompt or visible budget block missing from capture\n' >&2
+	exit 1
+fi
+tmux capture-pane -t "${proof_pane}" -p >"${proof_evidence_dir}/rail.txt"
+tmux capture-pane -t "${proof_pane}" -p -e >"${proof_evidence_dir}/rail.ansi.txt"
+printf '%s\n' "${proof_capture}"
+printf 'proof-faux-tui: evidence staged at %s\n' "${proof_evidence_dir}"
+
 tmux send-keys -t "${proof_pane}" -l '/quit'
 tmux send-keys -t "${proof_pane}" Enter
 proof_tui_exited=0
@@ -182,4 +271,10 @@ proof_shutdown_complete=1
 tmux kill-session -t "=${proof_session}"
 proof_session_owned=0
 
+printf 'status=PASS\nbundle=%s\ndaemon_socket=removed\n' "${cli_path}" >"${proof_evidence_dir}/SUCCESS"
+if [[ ! -s "${proof_evidence_dir}/SUCCESS" ]]; then
+	printf 'proof-faux-tui: success receipt was not persisted\n' >&2
+	exit 1
+fi
+printf 'proof-faux-tui: evidence %s (SUCCESS receipt present)\n' "${proof_evidence_dir}"
 printf 'proof-faux-tui: PASS\n'

@@ -8,6 +8,9 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.js";
+import { formatPrimeMethPrompt, PRIME_METH_PROMPT } from "../../../themes/prime-meth.js";
+import { theme } from "../theme/theme.js";
+import { skipPrimeMethBootAnimations } from "./prime-meth-boot.js";
 
 export interface CustomEditorOptions extends EditorOptions {
 	placeholder?: string;
@@ -54,6 +57,7 @@ export class CustomEditor extends Editor {
 	}
 
 	protected override formatPromptPrefix(prefix: string): string {
+		if (prefix === PRIME_METH_PROMPT) return formatPrimeMethPrompt(theme.colorMode);
 		return prefix.startsWith("!") ? this.borderColor(prefix) : prefix;
 	}
 
@@ -145,6 +149,8 @@ export class CustomEditor extends Editor {
 	}
 
 	handleInput(data: string): void {
+		if (skipPrimeMethBootAnimations()) return;
+
 		// Check extension-registered shortcuts first
 		if (this.onExtensionShortcut?.(data)) {
 			return;

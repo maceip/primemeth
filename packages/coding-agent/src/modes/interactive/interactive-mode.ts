@@ -134,6 +134,7 @@ import {
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
+import { PRIME_METH_PROMPT } from "../../themes/prime-meth.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { readClipboardImage } from "../../utils/clipboard-image.js";
@@ -206,6 +207,7 @@ import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
+import { consumePrimeMethBootInput, PrimeMethBootHeader } from "./components/prime-meth-boot.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
@@ -817,6 +819,8 @@ export interface InteractiveModeOptions {
 	returnToAgentsView?: boolean;
 	/** Enter fullscreen regardless of the persisted fullscreen preference. */
 	forceFullscreen?: boolean;
+	/** Override boot animation while retaining the settled Prime METH header. */
+	animatePrimeMethBoot?: boolean;
 	/**
 	 * The agents view already surfaced global startup notices (app/extension updates, tmux setup),
 	 * so this session must not repeat them in its chat stream. Distinct from `returnToAgentsView`,
@@ -1046,6 +1050,7 @@ export class InteractiveMode {
 	private headerContainer: Container;
 
 	private builtInHeader: Component | undefined = undefined;
+	private primeMethBootInputUnsubscribe: (() => void) | undefined;
 
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
@@ -1107,6 +1112,7 @@ export class InteractiveMode {
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
+			promptPrefix: PRIME_METH_PROMPT,
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 			isArgumentCommand: builtinSlashCommandTakesArgument,
@@ -1134,7 +1140,11 @@ export class InteractiveMode {
 		this.subagentSummaryLine.onCancel = () => this.focusEditor();
 		this.subagentSummaryLine.onChatAction = (data) => this.handleSubagentSummaryChatAction(data);
 		this.footerDataProvider = new FooterDataProvider(this.uiServices.getInitialCwd());
-		this.footer = new FooterComponent(this.footerDataProvider);
+		this.footer = new FooterComponent(
+			this.footerDataProvider,
+			() => this.getCurrentModelId(),
+			() => this.getCurrentCwd(),
+		);
 		this.footer.setAutoCompactEnabled(this.settingsManager.getCompactionEnabled());
 		this.setGoalAnnouncementBaseline(emptyGoalState());
 
@@ -1400,17 +1410,28 @@ export class InteractiveMode {
 						rawKeyHint("drop files", "to attach"),
 					].join("\n")
 				: undefined;
-			this.builtInHeader = new BrandSplashHeader(
+			const primeMethHeader = new PrimeMethBootHeader(
 				this.version,
 				() => this.getCurrentModelId(),
 				() => this.getCurrentCwd(),
-				verboseInstructions,
 				{
 					topPadding: true,
+					verboseInstructions,
 					getHideStartHint: () => !this.isNewChat(),
 					getStartHint: () => this.startHint,
+					requestRender: () => this.ui.requestRender(),
+					onAnimationStop: () => this.clearPrimeMethBootInputListener(),
+					animate: this.options.animatePrimeMethBoot,
 				},
 			);
+			this.builtInHeader = primeMethHeader;
+			if (primeMethHeader.isAnimating()) {
+				this.primeMethBootInputUnsubscribe = this.ui.addInputListener((data) => {
+					const result = consumePrimeMethBootInput(data);
+					if (result?.consume) this.clearPrimeMethBootInputListener();
+					return result;
+				});
+			}
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {
@@ -3661,6 +3682,11 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private clearPrimeMethBootInputListener(): void {
+		this.primeMethBootInputUnsubscribe?.();
+		this.primeMethBootInputUnsubscribe = undefined;
+	}
+
 	private setExtensionHeader(factory: ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined): void {
 		// Header may not be initialized yet if called during early initialization
 		if (!this.builtInHeader) {
@@ -3676,6 +3702,9 @@ export class InteractiveMode {
 		const index = this.headerContainer.children.indexOf(currentHeader);
 
 		if (factory) {
+			if (this.builtInHeader instanceof PrimeMethBootHeader) {
+				this.builtInHeader.skip();
+			}
 			this.customHeader = factory(this.ui, theme);
 			if (isExpandable(this.customHeader)) {
 				this.customHeader.setExpanded(this.toolOutputExpanded);
@@ -3923,6 +3952,9 @@ export class InteractiveMode {
 
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
 		this.editorComponentFactory = factory;
+		if (factory && this.builtInHeader instanceof PrimeMethBootHeader) {
+			this.builtInHeader.skip();
+		}
 		// Snapshot the current editor before replacing it. Paste markers are only
 		// meaningful while their originating editor still owns the paste snapshot.
 		const currentEditor = this.editor;
@@ -10015,6 +10047,10 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		this.stopGoalTrayTimer();
 		this.closeHeartbeatManager();
 		this.clearExtensionTerminalInputListeners();
+		this.clearPrimeMethBootInputListener();
+		if (this.builtInHeader instanceof PrimeMethBootHeader) {
+			this.builtInHeader.dispose();
+		}
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

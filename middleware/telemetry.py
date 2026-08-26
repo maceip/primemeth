@@ -172,12 +172,26 @@ class ProviderExchange:
     provider: str | None
     model: str | None
     status: int
+    ttft_ms: float | None
+    generation_ms: float | None
+    prefill_tokens: int | None
+    decode_tokens: int | None
+    prefill_tokens_per_second: float | None
+    decode_tokens_per_second: float | None
 
     @classmethod
     def from_mapping(cls, value: object) -> ProviderExchange:
         mapping = _mapping(value, "provider")
         fields = {"requestId", "payloadDigest", "provider", "model", "status"}
-        _keys(mapping, label="provider", required=fields)
+        optional = {
+            "ttftMs",
+            "generationMs",
+            "prefillTokens",
+            "decodeTokens",
+            "prefillTokensPerSecond",
+            "decodeTokensPerSecond",
+        }
+        _keys(mapping, label="provider", required=fields, optional=optional)
         provider = mapping["provider"]
         model = mapping["model"]
         if provider is not None and not isinstance(provider, str):
@@ -190,6 +204,42 @@ class ProviderExchange:
             provider=provider,
             model=model,
             status=_integer(mapping["status"], "provider.status"),
+            ttft_ms=(
+                _number(mapping["ttftMs"], "provider.ttftMs")
+                if "ttftMs" in mapping
+                else None
+            ),
+            generation_ms=(
+                _number(mapping["generationMs"], "provider.generationMs")
+                if "generationMs" in mapping
+                else None
+            ),
+            prefill_tokens=(
+                _integer(mapping["prefillTokens"], "provider.prefillTokens")
+                if "prefillTokens" in mapping
+                else None
+            ),
+            decode_tokens=(
+                _integer(mapping["decodeTokens"], "provider.decodeTokens")
+                if "decodeTokens" in mapping
+                else None
+            ),
+            prefill_tokens_per_second=(
+                _number(
+                    mapping["prefillTokensPerSecond"],
+                    "provider.prefillTokensPerSecond",
+                )
+                if "prefillTokensPerSecond" in mapping
+                else None
+            ),
+            decode_tokens_per_second=(
+                _number(
+                    mapping["decodeTokensPerSecond"],
+                    "provider.decodeTokensPerSecond",
+                )
+                if "decodeTokensPerSecond" in mapping
+                else None
+            ),
         )
 
 

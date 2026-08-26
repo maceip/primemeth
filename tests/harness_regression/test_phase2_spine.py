@@ -106,6 +106,39 @@ def test_mirrored_telemetry_schema_enforces_shape_and_sequence(
         validate_telemetry_file(path)
 
 
+def test_provider_telemetry_accepts_measured_throughput() -> None:
+    provider_payload = {
+        "requestId": "request-1",
+        "payloadDigest": "a" * 64,
+        "provider": "faux",
+        "model": "faux-model",
+        "status": 200,
+        "ttftMs": 1000.0,
+        "generationMs": 1000.0,
+        "prefillTokens": 100,
+        "decodeTokens": 10,
+        "prefillTokensPerSecond": 100.0,
+        "decodeTokensPerSecond": 10.0,
+    }
+    provider = {
+        **telemetry_event(1, "provider"),
+        "durationMs": 2000.0,
+        "provider": provider_payload,
+    }
+
+    parsed = TelemetryEvent.from_mapping(provider)
+
+    assert parsed.provider is not None
+    assert parsed.provider.ttft_ms == 1000.0
+    assert parsed.provider.prefill_tokens == 100
+    assert parsed.provider.decode_tokens_per_second == 10.0
+
+    invalid = dict(provider)
+    invalid["provider"] = {**provider_payload, "ttftMs": -1}
+    with pytest.raises(TelemetryValidationError, match="nonnegative number"):
+        TelemetryEvent.from_mapping(invalid)
+
+
 @pytest.mark.parametrize(
     ("reason", "reward"),
     [
