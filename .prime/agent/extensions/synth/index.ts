@@ -19,14 +19,11 @@ import {
 	BATS_WRAP_UP_INSTRUCTION,
 	batchBudgetUsedFromEnvironment,
 	BudgetTracker,
-	contextScalingFactor,
 	elideOldToolResponses,
 	formatBudgetBlock,
 	formatBudgetStatusLine,
 	injectBatsSystemPrompt,
-	qwenModeForRegime,
 	qwenSamplingForRegime,
-	scaledElisionTurns,
 	shouldSendContinuationNudge,
 } from "./budget.js";
 import {
@@ -45,10 +42,7 @@ import {
 import {
 	loadSynthConfig,
 	QWEN_SAMPLING,
-	QWEN_YARN_1M_ROPE_OVERRIDE,
 	resolveDataPlanePath,
-	type QwenConfig,
-	type QwenMode,
 	type SynthConfig,
 	type SynthConfigLoadResult,
 } from "./config.js";
@@ -166,6 +160,15 @@ interface SessionRuntime {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function activeModelIsQwen(ctx: ExtensionContext): boolean {
+	const model = ctx.model;
+	if (!model || model.api !== "openai-completions") return false;
+	return [model.provider, model.id, model.name].some((value) => {
+		const normalized = value.toLowerCase();
+		return normalized.startsWith("qwen") || normalized.includes("/qwen");
+	});
 }
 
 function secureTokenEquals(actual: string, expected: string): boolean {
@@ -1636,10 +1639,6 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.budget) {
 			const snapshot = runtime.budget.snapshot();
 			let firstUserSeen = false;
-			const elideTurns = scaledElisionTurns(
-				runtime.budget.config.elideToolResponsesAfterTurns,
-				runtime.configLoad.config?.qwen?.contextProfile,
-			);
 			messages = elideOldToolResponses(
 				messages.map((message) => {
 					if (message.role !== "user" || firstUserSeen) {
@@ -1648,7 +1647,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 					firstUserSeen = true;
 					return appendBudgetToUser(message, snapshot);
 				}),
-				elideTurns,
+				runtime.budget.config.elideToolResponsesAfterTurns,
 			).map((message) => appendBudgetToToolResult(message, snapshot));
 			const latest = messages.at(-1);
 			if (snapshot.fullyExhausted && (!latest || !messageContains(latest, BATS_WRAP_UP_INSTRUCTION))) {
@@ -1698,38 +1697,31 @@ export default function synthExtension(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
 		const runtime = runtimeFor(ctx);
 		const qwenConfig = runtime.configLoad.config?.qwen;
-		if (qwenConfig && event.payload && typeof event.payload === "object") {
+		let replacement: Record<string, unknown> | undefined;
+		if (
+			qwenConfig &&
+			!runtime.configLoad.config?.killSwitch.all &&
+			activeModelIsQwen(ctx) &&
+			event.payload &&
+			typeof event.payload === "object" &&
+			!Array.isArray(event.payload)
+		) {
 			const payloadRecord = event.payload as Record<string, unknown>;
 			const currentRegime = runtime.budget?.snapshot().regime ?? "HIGH";
-			const effectiveMode: QwenMode = runtime.budget
-				? qwenModeForRegime(currentRegime)
-				: qwenConfig.mode;
-			const sampling = QWEN_SAMPLING[effectiveMode];
-			for (const [key, val] of Object.entries(sampling)) {
-				payloadRecord[key] = val;
-			}
-			// Model-card YaRN recipe (opt-in): override targeted at text_config.rope_parameters.
-			// Native profile emits nothing (shipped config untouched).
-			if (qwenConfig.contextProfile === "yarn-1m") {
-				const textConfig =
-					typeof payloadRecord.text_config === "object" && payloadRecord.text_config !== null
-						? (payloadRecord.text_config as Record<string, unknown>)
-						: {};
-				payloadRecord.text_config = {
-					...textConfig,
-					rope_parameters: {
-						...QWEN_YARN_1M_ROPE_OVERRIDE.text_config.rope_parameters,
-					},
-				};
-			}
+			const sampling = runtime.budget
+				? qwenSamplingForRegime(currentRegime)
+				: QWEN_SAMPLING[qwenConfig.mode];
+			replacement = { ...payloadRecord, ...sampling };
 		}
+		const providerPayload = replacement ?? event.payload;
 		const provider = latestProvider(runtime);
 		if (provider) {
 			provider.startedAt = performance.now();
-			provider.payloadDigest = digestValue(event.payload);
+			provider.payloadDigest = digestValue(providerPayload);
 			provider.provider = ctx.model?.provider ?? provider.provider;
 			provider.model = ctx.model?.id ?? provider.model;
 		}
+		return replacement;
 	});
 
 	pi.on("after_provider_response", (event, ctx) => {

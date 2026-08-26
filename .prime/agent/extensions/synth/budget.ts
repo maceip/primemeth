@@ -3,7 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { isToolCallEventType, type ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
-import type { QwenConfig, QwenContextProfile, QwenMode, SynthBudgetConfig } from "./config.js";
+import type { QwenMode, SynthBudgetConfig } from "./config.js";
 import { QWEN_SAMPLING } from "./config.js";
 import {
 	type BudgetSnapshot,
@@ -21,19 +21,6 @@ export function qwenModeForRegime(regime: BudgetRegime): QwenMode {
 
 export function qwenSamplingForRegime(regime: BudgetRegime): Record<string, unknown> {
 	return QWEN_SAMPLING[qwenModeForRegime(regime)];
-}
-
-export function contextScalingFactor(profile?: QwenContextProfile): number {
-	return profile === "yarn-1m" ? 4 : 1;
-}
-
-export function scaledElisionTurns(baseTurns: number, profile?: QwenContextProfile): number {
-	if (baseTurns === 0) return 0;
-	return baseTurns * contextScalingFactor(profile);
-}
-
-export function scaledCompactionThreshold(baseTokens: number, profile?: QwenContextProfile): number {
-	return baseTokens * contextScalingFactor(profile);
 }
 
 interface BudgetCharge {

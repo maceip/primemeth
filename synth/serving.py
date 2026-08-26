@@ -19,11 +19,13 @@ from typing import Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-EngineName = Literal["transformers"]
+EngineName = Literal["transformers", "mlx", "llama.cpp"]
+TransformersEngineName = Literal["transformers"]
 Quantization = Literal["bnb-4bit", "bnb-8bit"]
 DeviceName = Literal["mps", "auto", "cpu"]
 
-ENGINE_NAMES: tuple[EngineName, ...] = ("transformers",)
+ENGINE_NAMES: tuple[EngineName, ...] = ("transformers", "mlx", "llama.cpp")
+SETUP_ENGINE_NAMES: tuple[TransformersEngineName, ...] = ("transformers",)
 QUANTIZATIONS: tuple[Quantization, ...] = ("bnb-4bit", "bnb-8bit")
 DEVICE_NAMES: tuple[DeviceName, ...] = ("mps", "auto", "cpu")
 
@@ -81,13 +83,27 @@ class ServingError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ServeRequest:
-    engine: EngineName
+    engine: TransformersEngineName
     model: str
     quantization: Quantization | None = None
     device: DeviceName = "mps"
     port: int = DEFAULT_PORT
     startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS
     served_model_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedServeRequest:
+    engine: str
+    model: str
+    command: tuple[str, ...]
+    host: str
+    port: int
+    startup_timeout_seconds: float
+    working_directory: Path
+    details: dict[str, object]
+    environment: dict[str, str] | None = None
+    health_probe_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +176,7 @@ class _ServeState:
     started_at: str
     updated_at: str
     stopped_at: str | None
+    model: str
     host: str
     port: int
     endpoint: str
@@ -181,6 +198,7 @@ class _ServeState:
             "startedAt": self.started_at,
             "updatedAt": self.updated_at,
             "stoppedAt": self.stopped_at,
+            "model": self.model,
             "host": self.host,
             "port": self.port,
             "endpoint": self.endpoint,
@@ -211,6 +229,8 @@ class _ServeState:
             raise ServingError(
                 f"serve state healthModels must be a string array: {path}"
             )
+        details = _mapping(mapping.get("details"), "details")
+        model_value = mapping.get("model", details.get("model"))
         return cls(
             schema_version=schema_version,
             engine=_string(mapping.get("engine"), "engine"),
@@ -224,18 +244,19 @@ class _ServeState:
             started_at=_string(mapping.get("startedAt"), "startedAt"),
             updated_at=_string(mapping.get("updatedAt"), "updatedAt"),
             stopped_at=_optional_string(mapping.get("stoppedAt"), "stoppedAt"),
+            model=_string(model_value, "model"),
             host=_string(mapping.get("host"), "host"),
             port=_integer(mapping.get("port"), "port"),
             endpoint=_string(mapping.get("endpoint"), "endpoint"),
             command=tuple(cast(list[str], command_value)),
             log=_string(mapping.get("log"), "log"),
             health_models=tuple(cast(list[str], health_value)),
-            details=_mapping(mapping.get("details"), "details"),
+            details=details,
             error=_optional_string(mapping.get("error"), "error"),
         )
 
 
-def setup_engine(engine: EngineName) -> dict[str, object]:
+def setup_engine(engine: TransformersEngineName) -> dict[str, object]:
     if engine != "transformers":
         raise ServingError(f"unsupported serving engine: {engine}")
     uv = shutil.which("uv")
@@ -332,15 +353,12 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
     if preflight.errors:
         rendered = json.dumps(preflight.as_dict(), sort_keys=True)
         raise ServingError(f"model preflight failed: {rendered}")
-    _assert_port_available(request.port)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     model_argument, process_directory = _prepare_model_argument(
         root,
         preflight.inventory,
         request.served_model_name,
     )
-    log_path = _log_path(root, request.engine)
-    state_path = _state_path(root)
     command = _transformers_command(executable, model_argument, request)
     environment = os.environ.copy()
     environment.update(
@@ -360,6 +378,49 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
     if configured_kernel_overrides:
         local_kernel_overrides.insert(0, configured_kernel_overrides)
     environment["LOCAL_KERNELS"] = ":".join(local_kernel_overrides)
+    model = (
+        str(preflight.inventory.local_path)
+        if preflight.inventory.local_path is not None
+        else request.model
+    )
+    return start_managed_server(
+        workspace,
+        ManagedServeRequest(
+            engine=request.engine,
+            model=model,
+            command=tuple(command),
+            host=_LOCAL_BIND_HOST,
+            port=request.port,
+            startup_timeout_seconds=request.startup_timeout_seconds,
+            working_directory=process_directory,
+            environment=environment,
+            health_probe_model=model_argument,
+            details={
+                "servedModel": model_argument,
+                "quantization": request.quantization,
+                "device": request.device,
+                "venv": str(venv),
+                "preflight": preflight.as_dict(),
+            },
+        ),
+    )
+
+
+def start_managed_server(
+    workspace: Path, request: ManagedServeRequest
+) -> dict[str, object]:
+    _validate_managed_request(request)
+    root = _serve_root(workspace)
+    state_path = _state_path(root)
+    previous = _read_state(state_path)
+    if previous is not None and _process_matches(previous):
+        raise ServingError(
+            f"{previous.engine} server is already running with pid {previous.pid}"
+        )
+    _assert_port_available(request.host, request.port)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root, 0o700)
+    log_path = _log_path(root, request.engine)
     descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.chmod(log_path, 0o600)
     started_at = _utc_now()
@@ -367,13 +428,15 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
     try:
         with os.fdopen(descriptor, "a", encoding="utf-8") as log_stream:
             log_stream.write(
-                f"\n[{started_at}] synth serve start: " + " ".join(command) + "\n"
+                f"\n[{started_at}] synth serve start: "
+                + " ".join(request.command)
+                + "\n"
             )
             log_stream.flush()
             process = subprocess.Popen(
-                command,
-                cwd=process_directory,
-                env=environment,
+                list(request.command),
+                cwd=request.working_directory,
+                env=request.environment,
                 stdin=subprocess.DEVNULL,
                 stdout=log_stream,
                 stderr=subprocess.STDOUT,
@@ -381,19 +444,14 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
                 start_new_session=True,
             )
         process_group_id = os.getpgid(process.pid)
-        if process_group_id != process.pid:
-            raise ServingError(
-                "transformers process did not establish a dedicated process group"
-            )
         identity = _process_identity(process.pid)
-        expected_command = " ".join(command)
-        if identity is None or not identity.command.endswith(expected_command):
+        if (
+            process_group_id != process.pid
+            or identity is None
+            or identity.process_group_id != process_group_id
+        ):
             raise ServingError(
-                "could not verify the complete transformers server process identity"
-            )
-        if identity.process_group_id != process_group_id:
-            raise ServingError(
-                "transformers process group changed before state was recorded"
+                f"could not establish a dedicated {request.engine} process identity"
             )
         state = _ServeState(
             schema_version=STATE_SCHEMA_VERSION,
@@ -406,36 +464,53 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
             started_at=started_at,
             updated_at=started_at,
             stopped_at=None,
-            host=_LOCAL_BIND_HOST,
+            model=request.model,
+            host=request.host,
             port=request.port,
-            endpoint=_local_http_url(_PUBLIC_HOST, request.port, "/v1"),
-            command=tuple(command),
+            endpoint=_local_http_url(request.host, request.port, "/v1"),
+            command=request.command,
             log=str(log_path),
             health_models=(),
-            details={
-                "model": (
-                    str(preflight.inventory.local_path)
-                    if preflight.inventory.local_path is not None
-                    else request.model
-                ),
-                "servedModel": model_argument,
-                "quantization": request.quantization,
-                "device": request.device,
-                "venv": str(venv),
-                "preflight": preflight.as_dict(),
-            },
+            details=request.details,
             error=None,
         )
         _write_state(state_path, state)
+        health_started_at = time.monotonic()
         health_models = _wait_until_healthy(
             process,
-            _LOCAL_BIND_HOST,
+            request.host,
             request.port,
             request.startup_timeout_seconds,
         )
+        if request.health_probe_model is not None:
+            remaining = request.startup_timeout_seconds - (
+                time.monotonic() - health_started_at
+            )
+            if remaining <= 0:
+                raise ServingError(
+                    "server passed /v1/models but exhausted the startup timeout "
+                    "before the chat probe"
+                )
+            _wait_until_chat_ready(
+                process,
+                request.host,
+                request.port,
+                request.health_probe_model,
+                remaining,
+            )
+        final_identity = _process_identity(process.pid)
+        if (
+            final_identity is None
+            or final_identity.process_group_id != process_group_id
+            or final_identity.birth_token != identity.birth_token
+        ):
+            raise ServingError(
+                f"{request.engine} process identity changed during startup"
+            )
         running = replace(
             state,
             status="running",
+            process_command=final_identity.command,
             updated_at=_utc_now(),
             health_models=health_models,
         )
@@ -467,7 +542,9 @@ def start_server(workspace: Path, request: ServeRequest) -> dict[str, object]:
             raise
         if isinstance(error, ServingError):
             raise
-        raise ServingError(f"could not start transformers server: {error}") from error
+        raise ServingError(
+            f"could not start {request.engine} server: {error}"
+        ) from error
 
 
 def serve_status(workspace: Path, engine: str | None = None) -> dict[str, object]:
@@ -750,6 +827,25 @@ def _validate_request(request: ServeRequest) -> None:
         raise ServingError("--startup-timeout-seconds must be from 1 to 7200")
     if request.served_model_name is not None:
         _validate_model_alias(request.served_model_name)
+
+
+def _validate_managed_request(request: ManagedServeRequest) -> None:
+    if _MODEL_ALIAS_PATTERN.fullmatch(request.engine) is None:
+        raise ServingError("managed serving engine name is invalid")
+    if not request.model.strip():
+        raise ServingError("managed serving model must be nonempty")
+    if not request.command or any(not item for item in request.command):
+        raise ServingError("managed serving command must be nonempty")
+    if not request.working_directory.is_dir():
+        raise ServingError(
+            f"managed serving working directory is unavailable: "
+            f"{request.working_directory}"
+        )
+    _validate_loopback_host(request.host)
+    if not 1 <= request.port <= 65_535:
+        raise ServingError("managed serving port must be from 1 to 65535")
+    if not 1.0 <= request.startup_timeout_seconds <= 7_200.0:
+        raise ServingError("managed serving startup timeout must be from 1 to 7200")
 
 
 def _preflight(model: str, quantization: Quantization | None) -> _Preflight:
@@ -1249,13 +1345,16 @@ def _transformers_command(
     return command
 
 
-def _assert_port_available(port: int) -> None:
+def _assert_port_available(host: str, port: int) -> None:
+    _validate_loopback_host(host)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind((_LOCAL_BIND_HOST, port))
+        with socket.socket(family, socket.SOCK_STREAM) as listener:
+            listener.bind((host, port))
     except OSError as error:
         raise ServingError(
-            f"localhost port {port} is unavailable; refusing to validate another server"
+            f"loopback port {host}:{port} is unavailable; "
+            "refusing to validate another server"
         ) from error
 
 
@@ -1271,7 +1370,7 @@ def _wait_until_healthy(
         return_code = process.poll()
         if return_code is not None:
             raise ServingError(
-                f"transformers serve exited before health check (exit {return_code})"
+                f"server process exited before health check (exit {return_code})"
             )
         try:
             return _fetch_models(host, port, timeout_seconds=2.0)
@@ -1279,8 +1378,7 @@ def _wait_until_healthy(
             last_error = str(error)
         time.sleep(1.0)
     raise ServingError(
-        f"transformers serve did not pass /v1/models within "
-        f"{timeout_seconds:g}s: {last_error}"
+        f"server did not pass /v1/models within {timeout_seconds:g}s: {last_error}"
     )
 
 
@@ -1315,6 +1413,81 @@ def _fetch_models(host: str, port: int, *, timeout_seconds: float) -> tuple[str,
         if isinstance(model_id, str):
             model_ids.append(model_id)
     return tuple(model_ids)
+
+
+def _wait_until_chat_ready(
+    process: subprocess.Popen[str],
+    host: str,
+    port: int,
+    model: str,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "server did not answer"
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            raise ServingError(
+                f"server process exited before chat probe (exit {return_code})"
+            )
+        remaining = deadline - time.monotonic()
+        try:
+            _fetch_chat_completion(
+                host,
+                port,
+                model,
+                timeout_seconds=max(0.1, min(30.0, remaining)),
+            )
+            return
+        except ServingError as error:
+            last_error = str(error)
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise ServingError(
+        f"server did not pass /v1/chat/completions within "
+        f"{timeout_seconds:g}s: {last_error}"
+    )
+
+
+def _fetch_chat_completion(
+    host: str,
+    port: int,
+    model: str,
+    *,
+    timeout_seconds: float,
+) -> None:
+    _validate_loopback_host(host)
+    opener = build_opener(ProxyHandler({}))
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+    ).encode()
+    request = Request(
+        _local_http_url(host, port, "/v1/chat/completions"),
+        data=payload,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+    except HTTPError as error:
+        raise ServingError(
+            f"/v1/chat/completions returned HTTP {error.code}"
+        ) from error
+    except (OSError, URLError) as error:
+        raise ServingError(f"/v1/chat/completions is unavailable: {error}") from error
+    try:
+        decoded: object = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ServingError("/v1/chat/completions returned invalid JSON") from error
+    mapping = _mapping(decoded, "/v1/chat/completions response")
+    choices = mapping.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ServingError("/v1/chat/completions returned no completion choice")
 
 
 def _terminate_spawned_process(process: subprocess.Popen[str]) -> None:

@@ -149,7 +149,7 @@ const QwenModeSchema = Type.Union([Type.Literal("thinking"), Type.Literal("non-t
 });
 
 const QwenContextProfileSchema = Type.Union([Type.Literal("native"), Type.Literal("yarn-1m")], {
-	description: "Qwen context profile (native 262,144 vs opt-in yarn-1m).",
+	description: "Qwen serving profile; yarn-1m is an opt-in load-time engine recipe.",
 });
 
 const QwenConfigSchema = Type.Object(
@@ -237,27 +237,6 @@ export const QWEN_SAMPLING: Record<QwenMode, {
 		repetition_penalty: 1.0,
 	},
 };
-
-/**
- * Model-card YaRN recipe (opt-in) override for 1M context:
- * Targets text_config.rope_parameters while preserving shipped keys
- * (mrope_interleaved, mrope_section, partial_rotary_factor, rope_theta)
- * and setting rope_type='yarn', factor=4.0, original_max_position_embeddings=262144 (262144 x 4 = 1M).
- * Native profile emits nothing (shipped config untouched).
- */
-export const QWEN_YARN_1M_ROPE_OVERRIDE = {
-	text_config: {
-		rope_parameters: {
-			mrope_interleaved: true,
-			mrope_section: [11, 11, 10],
-			partial_rotary_factor: 0.25,
-			rope_theta: 10000000,
-			rope_type: "yarn",
-			factor: 4.0,
-			original_max_position_embeddings: 262144,
-		},
-	},
-} as const;
 
 export const SYNTH_CONFIG_DEFAULTS: Omit<SynthConfig, "endpoint"> = {
 	telemetry: { dir: ".synth/telemetry" },

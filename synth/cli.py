@@ -33,22 +33,37 @@ from synth.effectiveness import (
     EndpointSpec,
     run_effectiveness_evaluation,
 )
+from synth.engine import EngineError
 from synth.matts import MattsError, default_matts_run_id, run_matts
 from synth.model import ModelCallError, fixture_path_from_environment
-from synth.model_pull import ModelPullError, Variant, pull_model
+from synth.model_pull import (
+    DEFAULT_QWEN_GGUF_QUANT,
+    ModelPullError,
+    Variant,
+    pull_model,
+)
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
+from synth.quantize import (
+    QuantizeError,
+    default_input,
+    default_output,
+    run_quantize,
+)
 from synth.reasoning_bank import ReasoningBankError, distill_path, judge_session
+from synth.serve import LocalEngineName, ServeError
+from synth.serve import start as start_local_server
 from synth.service import PROTOCOL_VERSION, BridgeService, ServiceError
 from synth.serving import (
     DEVICE_NAMES,
     ENGINE_NAMES,
     QUANTIZATIONS,
+    SETUP_ENGINE_NAMES,
     DeviceName,
-    EngineName,
     Quantization,
     ServeRequest,
     ServingError,
+    TransformersEngineName,
     serve_status,
     setup_engine,
     start_server,
@@ -85,18 +100,25 @@ def _parser() -> argparse.ArgumentParser:
     engine_setup = engine_commands.add_parser(
         "setup", help="create or update a serving engine environment"
     )
-    engine_setup.add_argument("engine", choices=ENGINE_NAMES)
+    engine_setup.add_argument("engine", choices=SETUP_ENGINE_NAMES)
 
     serve = commands.add_parser("serve", help="manage local model servers")
     serve_commands = serve.add_subparsers(dest="serve_command", required=True)
     serve_start = serve_commands.add_parser("start", help="start a local model server")
     serve_start.add_argument("--engine", choices=ENGINE_NAMES, required=True)
-    serve_start.add_argument("--model", required=True)
+    serve_start.add_argument("--model")
     serve_start.add_argument("--quantize", choices=QUANTIZATIONS)
-    serve_start.add_argument("--device", choices=DEVICE_NAMES, default="mps")
-    serve_start.add_argument("--port", type=int, default=8000)
-    serve_start.add_argument("--startup-timeout-seconds", type=float, default=900.0)
+    serve_start.add_argument("--device", choices=DEVICE_NAMES)
+    serve_start.add_argument("--port", type=int)
+    serve_start.add_argument(
+        "--startup-timeout-seconds",
+        "--timeout-seconds",
+        dest="startup_timeout_seconds",
+        type=float,
+    )
     serve_start.add_argument("--served-model-name")
+    serve_start.add_argument("--host", default="127.0.0.1")
+    serve_start.add_argument("--context-profile", choices=("native", "yarn-1m"))
     serve_stop = serve_commands.add_parser("stop", help="stop a local model server")
     serve_stop.add_argument("--engine")
     serve_status_parser = serve_commands.add_parser(
@@ -219,12 +241,30 @@ def _parser() -> argparse.ArgumentParser:
         "--target",
         type=Path,
         default=None,
-        help="destination directory (default: /Users/mac/models/<repo-name>)",
+        help="destination directory (default: ~/models/<repo-name>)",
+    )
+    pull.add_argument(
+        "--gguf-quant",
+        default=None,
+        help=(
+            "GGUF quantization directory to download "
+            f"(default with --variant gguf: {DEFAULT_QWEN_GGUF_QUANT})"
+        ),
     )
     pull.add_argument(
         "--dry-run",
         action="store_true",
         help="print download plan and next steps without downloading",
+    )
+    quantize = model_commands.add_parser(
+        "quantize", help="convert bf16 weights to mixed46 MLX"
+    )
+    quantize.add_argument("--input", type=Path, default=default_input())
+    quantize.add_argument("--output", type=Path, default=default_output())
+    quantize.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the resolved recipe without converting",
     )
 
     commands.add_parser("config", help="show resolved synth configuration")
@@ -284,24 +324,71 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine_command = cast(str, args.engine_command)
             if engine_command != "setup":
                 raise ValueError(f"unknown engine command: {engine_command}")
-            _write_json(setup_engine(cast(EngineName, args.engine)))
+            _write_json(setup_engine(cast(TransformersEngineName, args.engine)))
             return 0
         if command == "serve":
             serve_command = cast(str, args.serve_command)
             if serve_command == "start":
-                _write_json(
-                    start_server(
-                        Path.cwd(),
-                        ServeRequest(
-                            engine=cast(EngineName, args.engine),
-                            model=cast(str, args.model),
-                            quantization=cast(Quantization | None, args.quantize),
-                            device=cast(DeviceName, args.device),
-                            port=cast(int, args.port),
-                            startup_timeout_seconds=cast(
-                                float, args.startup_timeout_seconds
+                selected = cast(str, args.engine)
+                model = cast(str | None, args.model)
+                configured_port = cast(int | None, args.port)
+                configured_timeout = cast(float | None, args.startup_timeout_seconds)
+                if selected == "transformers":
+                    if model is None:
+                        raise ValueError("--model is required for transformers")
+                    if cast(str, args.host) != "127.0.0.1":
+                        raise ValueError("transformers only supports --host 127.0.0.1")
+                    if cast(str | None, args.context_profile) is not None:
+                        raise ValueError(
+                            "--context-profile is only supported by llama.cpp"
+                        )
+                    _write_json(
+                        start_server(
+                            Path.cwd(),
+                            ServeRequest(
+                                engine="transformers",
+                                model=model,
+                                quantization=cast(Quantization | None, args.quantize),
+                                device=cast(DeviceName | None, args.device) or "mps",
+                                port=(
+                                    configured_port
+                                    if configured_port is not None
+                                    else 8000
+                                ),
+                                startup_timeout_seconds=(
+                                    configured_timeout
+                                    if configured_timeout is not None
+                                    else 900.0
+                                ),
+                                served_model_name=cast(
+                                    str | None, args.served_model_name
+                                ),
                             ),
-                            served_model_name=cast(str | None, args.served_model_name),
+                        )
+                    )
+                    return 0
+                if cast(Quantization | None, args.quantize) is not None:
+                    raise ValueError("--quantize is only supported by transformers")
+                if cast(DeviceName | None, args.device) is not None:
+                    raise ValueError("--device is only supported by transformers")
+                if (
+                    selected == "mlx"
+                    and cast(str | None, args.context_profile) is not None
+                ):
+                    raise ValueError("--context-profile is only supported by llama.cpp")
+                _write_json(
+                    start_local_server(
+                        Path.cwd(),
+                        engine=cast(LocalEngineName, selected),
+                        model=Path(model) if model is not None else None,
+                        port=(configured_port if configured_port is not None else 8080),
+                        host=cast(str, args.host),
+                        context_profile=cast(str | None, args.context_profile),
+                        alias=cast(str | None, args.served_model_name),
+                        timeout_seconds=(
+                            configured_timeout
+                            if configured_timeout is not None
+                            else 300.0
                         ),
                     )
                 )
@@ -474,8 +561,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     variant=cast(Variant, args.variant),
                     target_dir=cast(Path | None, args.target),
                     dry_run=cast(bool, args.dry_run),
+                    gguf_quant=cast(str | None, args.gguf_quant),
                 )
                 return 0
+            if model_command == "quantize":
+                return run_quantize(
+                    cast(Path, args.input),
+                    cast(Path, args.output),
+                    dry_run=cast(bool, args.dry_run),
+                )
             raise ValueError(f"unknown model command: {model_command}")
         if command == "config":
             settings = load_synth_settings(Path.cwd())
@@ -527,12 +621,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         EmbeddingUnavailableError,
         BatchWiringError,
         EffectivenessError,
+        EngineError,
         MattsError,
         MemoryStoreError,
         ModelCallError,
         ModelPullError,
         OSError,
+        QuantizeError,
         ReasoningBankError,
+        ServeError,
         ServiceError,
         SessionParseError,
         SkillCompilerError,

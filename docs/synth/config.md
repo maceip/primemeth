@@ -37,6 +37,8 @@ Synth reads one project-level `synth.json`. If the file is absent, the extension
 | `skillCompiler.maxPerSession` | integer | when skillCompiler is present | `2` | min 0, max 20 | Maximum admitted compiler requests per session. |
 | `skillCompiler.quarantine` | string | when skillCompiler is present | `".synth/quarantine"` | min length 1 | Compiler quarantine path inside .synth. |
 | `killSwitch.all` | boolean | when killSwitch is present | `false` | none | Disable all Synth runtime features when true. |
+| `qwen.mode` | thinking \| non-thinking | when qwen is present | none | none | Qwen sampling mode. |
+| `qwen.contextProfile` | native \| yarn-1m | when qwen is present | none | none | Qwen serving profile; yarn-1m is an opt-in load-time engine recipe. |
 
 ## Operational semantics
 
