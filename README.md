@@ -1,6 +1,8 @@
-<img width="514" src="https://github.com/user-attachments/assets/b471b3d3-bc05-4872-8f34-3866c034c3cb" />
+<img width="512" src="https://github.com/user-attachments/assets/dbeb27d8-e24d-4a5e-a7a4-99fe2f8cc658" />
 
-synth is a vendored [prime agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace — an rlm-native terminal coding and research harness — modified to integrate three research systems and a quarantine-gated skill compiler behind one typescript extension and one python cli. it learns from both successful and failed trajectories, tracks tool-call budgets in the transcript, and improves its own harness from execution traces, with runtime and optimizer state kept local.
+# PRIME METH
+
+prime meth is a vendored [prime agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace — an rlm-native terminal coding and research harness — modified to integrate three research systems and a quarantine-gated skill compiler behind one typescript extension and one python cli. it learns from both successful and failed trajectories, tracks tool-call budgets in the transcript, and improves its own harness from execution traces, with runtime and optimizer state kept local.
 
 ## upstream
 
