@@ -1,0 +1,16 @@
+{
+	"extends": "../../../../tsconfig.base.json",
+	"compilerOptions": {
+		"declaration": false,
+		"declarationMap": false,
+		"noEmit": true,
+		"paths": {
+			"*": ["../../../../*"],
+			"@earendil-works/pi-agent-core": ["../../../../packages/agent/src/index.ts"],
+			"@earendil-works/pi-ai": ["../../../../packages/ai/src/index.ts"],
+			"@earendil-works/pi-coding-agent": ["../../../../packages/coding-agent/src/index.ts"],
+			"typebox": ["../../../../node_modules/typebox"]
+		}
+	},
+	"include": ["./*.ts", "../../../../scripts/synth-phase2-demo.ts"]
+}

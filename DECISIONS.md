@@ -183,3 +183,24 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Require air-gapped operation after setup; restrict all configured endpoints to loopback.
 - Why: The operator clarified Law 3 as replacement of vendor services with local or self-hostable equivalents, not a ban on ordinary user-directed networking. This also records the Phase 1 test trim required by standing directive v4.
 - Affected files: `DECISIONS.md`, `INTEGRATION_MAP.md`, `PHASE1_PLAN.md`, Phase 1 report, and the canceled Phase 8 interceptor work item.
+
+## 2026-08-26 — D-0027: Never synchronize the overlay environment at runtime
+
+- Decision: The extension launches `uv run --project <cwd> --no-sync synth-bridge`; a missing prepared environment disables the bridge once for that session. Phase 2 exposes and validates the `memory.query` and `memory.insert` wire contracts but returns `feature_disabled` until the Phase 4 fidelity sources are reread and the store is implemented.
+- Alternatives: Let `uv run` install or update dependencies on demand; spawn a new Python process per request; implement speculative memory behavior in Phase 2.
+- Why: Runtime must not mutate its control-plane environment or depend on network setup, and a long-lived bounded bridge preserves graceful vanilla operation. Reserving strict commands prevents boundary churn without misreporting an unimplemented capability.
+- Affected files: `.prime/agent/extensions/synth/bridge.ts`, `synth/bridge.py`, `synth/protocol.py`, `synth/service.py`, `pyproject.toml`.
+
+## 2026-08-26 — D-0028: Preserve reviewed prompt bytes outside line-length policy
+
+- Decision: Ruff ignores only `E501` for the two reviewed prompt-port modules; all other rules still apply. TypeBox remains the telemetry write authority, while the Python mirror deliberately validates the same field shape and numeric constraints before CLI reads.
+- Alternatives: Reflow the prompt strings and provenance lines; disable lint for the overlay; maintain unrelated JSON schemas in both languages.
+- Why: Reflowing near-verbatim research contributions obscures fidelity review, whereas a narrow line-length exception preserves hashes and leaves executable code under normal lint and strict typing.
+- Affected files: `pyproject.toml`, `local_memory/prompts_reasoning_bank.py`, `middleware/prompts_bats.py`, `.prime/agent/extensions/synth/telemetry.ts`, `middleware/telemetry.py`.
+
+## 2026-08-26 — D-0029: Enforce runtime control-plane policy at the available tool boundary
+
+- Decision: The extension blocks direct edits to Synth control-plane roots and known files, repository/dependency mutation commands, and recognizable shell/IPython writes that target those roots. This hook is a fail-closed policy layer, not an operating-system sandbox; Phase 7 adds the required independent static skill gate.
+- Alternatives: Patch every core tool; disable editing and shells entirely; claim exhaustive command-string sandboxing; wait until the compiler exists.
+- Why: `tool_call` is the only extension surface before execution and can preserve normal coding work while preventing ordinary self-modification paths. Symlink, indirection, and subprocess completeness require deterministic package inspection as the second enforcement layer rather than overstating regex coverage.
+- Affected files: `.prime/agent/extensions/synth/guard.ts`, `.prime/agent/extensions/synth/index.ts`, `scripts/synth-phase2-demo.ts`, future Phase 7 skill gate.

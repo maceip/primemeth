@@ -1,5 +1,4 @@
-"""Not yet imported; wired in Phase 3/4/5 (orphan-check exemption)."""
-
+"""Pinned ReasoningBank prompt ports audited through the Synth CLI manifest."""
 
 # Source: reasoning-bank | third_party/src/minisweagent/memory/instruction.py:16-38 | commit ed80611 | PORTED (verbatim).
 SUCCESSFUL_SI = """You are an expert in coding, specifically fixing a given issue in a code repository. You will be given an issue to be fixed, the corresponding trajectory that represents **how an agent successfully resolved the issue**.

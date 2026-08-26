@@ -1,5 +1,4 @@
-"""Not yet imported; wired in Phase 3/4/5 (orphan-check exemption)."""
-
+"""Pinned BATS prompt ports audited through the Synth CLI port manifest."""
 
 # Source: budget-aware-agent | src/prompts_bats.py:120-247 | commit 37d23f6 | ADAPTED (domain wording only).
 # Original phrases: "AI reasoner with Google Search and Browsing tools" and "Solve the question".
@@ -163,7 +162,9 @@ BATS_NO_URL_BUDGET_LEFT = "No url budget left."
 
 
 # Source: budget-aware-agent | src/prompts_bats.py:278-288 | commit 37d23f6 | PORTED (verbatim).
-PR_PROMPT_GENERATE_FINAL_ANSWER = "Directly provide the final enclosed in <answer> and </answer>."
+PR_PROMPT_GENERATE_FINAL_ANSWER = (
+    "Directly provide the final enclosed in <answer> and </answer>."
+)
 
 
 # Source: budget-aware-agent | src/prompts_bats.py:270-275 | commit 37d23f6 | PORTED (verbatim).

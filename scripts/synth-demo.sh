@@ -10,6 +10,8 @@ faux_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/eng-4600-fa
 summary_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/synth-local-summary-extension.ts"
 setup_script="${script_dir}/setup-offline.sh"
 tsx_path="${synth_root}/node_modules/.bin/tsx"
+phase2_driver_path="${script_dir}/synth-phase2-demo.ts"
+wiring_script="${script_dir}/check-wiring.sh"
 
 for required_command in git node npm perl tmux; do
 	if ! command -v "${required_command}" >/dev/null 2>&1; then
@@ -66,7 +68,14 @@ fi
 
 printf 'synth-demo: Phase 1 A3 pinned-catalog build PASS (%s)\n' "${catalog_hash_after}"
 
-for required_file in "${cli_path}" "${faux_fixture_path}" "${summary_fixture_path}" "${setup_script}" "${tsx_path}"; do
+for required_file in \
+	"${cli_path}" \
+	"${faux_fixture_path}" \
+	"${summary_fixture_path}" \
+	"${setup_script}" \
+	"${tsx_path}" \
+	"${phase2_driver_path}" \
+	"${wiring_script}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
 		exit 1
@@ -420,6 +429,26 @@ if [[ ! -S "${demo_tui_socket}" ]]; then
 	printf 'synth-demo: local-default TUI daemon socket was not observed\n' >&2
 	exit 1
 fi
+
+tmux send-keys -t "${demo_tui_pane}" -l '/synth status'
+tmux send-keys -t "${demo_tui_pane}" Enter
+demo_synth_status=0
+for ((demo_attempt = 0; demo_attempt < 80; demo_attempt++)); do
+	demo_tui_capture="$(tmux capture-pane -t "${demo_tui_pane}" -p -S -)"
+	if grep -Fq 'Synth status' <<<"${demo_tui_capture}" && \
+		grep -Fq 'configEcho=' <<<"${demo_tui_capture}" && \
+		grep -Eq 'bridge=up pid=[0-9]+ protocol=1 memory=pending' <<<"${demo_tui_capture}"; then
+		demo_synth_status=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_synth_status}" -ne 1 ]]; then
+	printf '%s\n' "${demo_tui_capture}" >&2
+	printf 'synth-demo: discovered /synth status did not render bridge and config state\n' >&2
+	exit 1
+fi
+printf 'synth-demo: Phase 2 discovered /synth status PASS\n'
 
 tmux send-keys -t "${demo_tui_pane}" -l '/quit'
 tmux send-keys -t "${demo_tui_pane}" Enter
@@ -804,3 +833,70 @@ if (optInSkills.some((skill) => skill.name === "linear" || skill.name === "notio
 ' "${synth_root}" "${demo_agent_dir}"
 )
 printf 'synth-demo: Phase 1 A6 remote-backed and auth-gated skill defaults PASS\n'
+
+phase2_telemetry="${demo_dir}/phase2-telemetry.jsonl"
+printf 'synth-demo: pre-run process receipt phase2_driver=absent bridge_fixture=absent\n'
+(
+	cd "${synth_root}"
+	SYNTH_PHASE2_TELEMETRY_OUT="${phase2_telemetry}" \
+		"${tsx_path}" "${phase2_driver_path}"
+)
+(
+	cd "${synth_root}"
+	uv run --project . --no-sync synth telemetry validate "${phase2_telemetry}"
+)
+printf 'synth-demo: Phase 2 mirrored telemetry validation PASS\n'
+
+bridge_output="$({
+	printf '%s\n' 'not-json'
+	printf '%s\n' '{"id":"demo-ping","command":"ping","params":{"protocolVersion":1}}'
+	printf '%s\n' '{"id":"demo-memory","command":"memory.query","params":{"query":"toy","taskDescription":"coding","k":3,"minScore":0.35,"statuses":["success","fail"],"itemTypes":["strategy"]}}'
+} | (
+	cd "${synth_root}"
+	uv run --project . --no-sync synth-bridge
+))"
+printf '%s\n' "${bridge_output}"
+node --input-type=module --eval '
+const responses = process.argv[1].split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (
+	responses.length !== 3 ||
+	responses[0]?.id !== null ||
+	responses[0]?.ok !== false ||
+	responses[0]?.error?.code !== "invalid_json" ||
+	responses[1]?.id !== "demo-ping" ||
+	responses[1]?.ok !== true ||
+	responses[1]?.result?.protocolVersion !== 1 ||
+	responses[1]?.result?.memoryAvailable !== false ||
+	responses[2]?.id !== "demo-memory" ||
+	responses[2]?.ok !== false ||
+	responses[2]?.error?.code !== "feature_disabled"
+) {
+	throw new Error("Synth bridge framing or Phase 4 capability boundary changed");
+}
+' "${bridge_output}"
+printf 'synth-demo: Phase 2 strict JSON-lines framing PASS\n'
+
+embed_output="$(
+	cd "${synth_root}"
+	uv run --project . --no-sync synth embed --kind query 'Phase 2 local embedding proof'
+)"
+node --input-type=module --eval '
+const result = JSON.parse(process.argv[1]);
+if (
+	result.model !== "BAAI/bge-small-en-v1.5" ||
+	result.dimension !== 384 ||
+	!Array.isArray(result.embeddings) ||
+	result.embeddings.length !== 1 ||
+	result.embeddings[0].length !== 384 ||
+	!result.embeddings[0].every(Number.isFinite)
+) {
+	throw new Error("prepared local embedder returned an invalid vector");
+}
+' "${embed_output}"
+printf 'synth-demo: Phase 2 prepared local embedder PASS\n'
+
+(
+	cd "${synth_root}"
+	"${wiring_script}"
+)
+printf 'synth-demo: Phase 2 two-head wiring PASS\n'

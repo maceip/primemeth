@@ -1,0 +1,38 @@
+{
+	"endpoint": {
+		"baseUrl": "http://localhost:8000/v1",
+		"model": "local-main",
+		"smallModel": "local-small",
+		"apiKeyEnv": "SYNTH_LOCAL_API_KEY"
+	},
+	"telemetry": { "dir": ".synth/telemetry" },
+	"budgets": {
+		"bash": 60,
+		"edit": 40,
+		"ipython": 60,
+		"subagents": 4,
+		"tokens": 0,
+		"costUsd": 0
+	},
+	"memory": {
+		"enabled": false,
+		"k": 3,
+		"minScore": 0.35,
+		"db": ".synth/synth.db",
+		"embedModel": "BAAI/bge-small-en-v1.5",
+		"judgeModel": "small"
+	},
+	"verifier": {
+		"interactive": false,
+		"batch": false,
+		"maxCycles": 2,
+		"contGen": { "enabled": true, "minBudgetFrac": 0.2 }
+	},
+	"optimizer": { "config": "optimizer/configs/synth_local.yaml" },
+	"skillCompiler": {
+		"enabled": false,
+		"maxPerSession": 2,
+		"quarantine": ".synth/quarantine"
+	},
+	"killSwitch": { "all": false }
+}
