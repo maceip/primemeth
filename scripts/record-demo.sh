@@ -46,11 +46,6 @@ try {
 	exit 2
 fi
 
-if [[ ! -f "${cli_path}" ]]; then
-	printf 'record-demo: built CLI missing at %s; run npm run build first\n' "${cli_path}" >&2
-	exit 1
-fi
-
 demo_dir="$(mktemp -d /tmp/synth-record-demo.XXXXXX)"
 demo_agent_dir="${demo_dir}/agent"
 demo_socket="${demo_dir}/daemon.sock"
@@ -132,6 +127,11 @@ if (process.env.NO_PROXY !== "localhost,127.0.0.1,::1") throw new Error("NO_PROX
 if [[ "${SYNTH_DEMO_CHECK_ENV_ONLY:-0}" == "1" ]]; then
 	printf 'record-demo: environment isolation PASS\n'
 	exit 0
+fi
+
+if [[ ! -f "${cli_path}" ]]; then
+	printf 'record-demo: built CLI missing at %s; run npm run build first\n' "${cli_path}" >&2
+	exit 1
 fi
 
 run_isolated \
