@@ -7,7 +7,7 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from compiler.service import CompileRequest, SkillCompiler, SkillCompilerError
@@ -33,11 +33,22 @@ from synth.effectiveness import (
     EndpointSpec,
     run_effectiveness_evaluation,
 )
+from synth.engine import EngineError
 from synth.matts import MattsError, default_matts_run_id, run_matts
 from synth.model import ModelCallError, fixture_path_from_environment
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
+from synth.quantize import (
+    QuantizeError,
+    default_input,
+    default_output,
+    run_quantize,
+)
 from synth.reasoning_bank import ReasoningBankError, distill_path, judge_session
+from synth.serve import ServeError
+from synth.serve import start as serve_start
+from synth.serve import status as serve_status
+from synth.serve import stop as serve_stop
 from synth.service import PROTOCOL_VERSION, BridgeService, ServiceError
 from synth.session import SessionParseError
 
@@ -160,6 +171,43 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("path", type=Path)
 
     commands.add_parser("bridge", help=argparse.SUPPRESS)
+
+    serve = commands.add_parser("serve", help="manage the local inference engine")
+    serve_commands = serve.add_subparsers(dest="serve_command", required=True)
+    start = serve_commands.add_parser(
+        "start", help="start mlx_lm.server or llama-server"
+    )
+    start.add_argument(
+        "--engine",
+        choices=("mlx", "llama.cpp"),
+        default="mlx",
+        help="primary engine is mlx; llama.cpp is the fallback",
+    )
+    start.add_argument("--model", type=Path, help="MLX model directory or GGUF path")
+    start.add_argument("--port", type=int, default=8080)
+    start.add_argument("--host", default="127.0.0.1")
+    start.add_argument(
+        "--context-profile",
+        choices=("native", "yarn-1m"),
+        help="yarn-1m adds YaRN rope flags for llama.cpp",
+    )
+    start.add_argument("--alias", help="llama.cpp --alias (defaults to the model name)")
+    start.add_argument("--timeout-seconds", type=float, default=300.0)
+    serve_commands.add_parser("stop", help="stop the local engine")
+    serve_commands.add_parser("status", help="check pid state and GET /v1/models")
+
+    model = commands.add_parser("model", help="manage local model weights")
+    model_commands = model.add_subparsers(dest="model_command", required=True)
+    quantize = model_commands.add_parser(
+        "quantize", help="convert bf16 weights to mixed46 MLX"
+    )
+    quantize.add_argument("--input", type=Path, default=default_input())
+    quantize.add_argument("--output", type=Path, default=default_output())
+    quantize.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the resolved recipe without converting",
+    )
     return parser
 
 
@@ -360,6 +408,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write_json(demotion_outcome.as_dict())
             return 0
+        if command == "serve":
+            serve_command = cast(str, args.serve_command)
+            workspace = Path.cwd()
+            if serve_command == "start":
+                engine = cast(str, args.engine)
+                if engine not in ("mlx", "llama.cpp"):
+                    raise ValueError(f"unknown engine: {engine}")
+                launched = serve_start(
+                    workspace,
+                    engine=cast(Literal["mlx", "llama.cpp"], engine),
+                    model=cast(Path | None, args.model),
+                    port=cast(int, args.port),
+                    host=cast(str, args.host),
+                    context_profile=cast(str | None, args.context_profile),
+                    alias=cast(str | None, args.alias),
+                    timeout_seconds=cast(float, args.timeout_seconds),
+                )
+                argv = cast(list[str], launched["argv"])
+                print(f"launched: {' '.join(argv)}")
+                print(f"endpoint: {launched['endpoint']}")
+                return 0
+            if serve_command == "stop":
+                stopped = serve_stop(workspace)
+                print(f"stopped pid {stopped['pid']}")
+                return 0
+            if serve_command == "status":
+                _write_json(serve_status(workspace))
+                return 0
+            raise ValueError(f"unknown serve command: {serve_command}")
+        if command == "model":
+            model_command = cast(str, args.model_command)
+            if model_command == "quantize":
+                return run_quantize(
+                    cast(Path, args.input),
+                    cast(Path, args.output),
+                    dry_run=cast(bool, args.dry_run),
+                )
+            raise ValueError(f"unknown model command: {model_command}")
         if command == "bridge":
             return run_bridge()
         raise ValueError(f"unknown command: {command}")
@@ -367,11 +453,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         EmbeddingUnavailableError,
         BatchWiringError,
         EffectivenessError,
+        EngineError,
         MattsError,
         MemoryStoreError,
         ModelCallError,
         OSError,
+        QuantizeError,
         ReasoningBankError,
+        ServeError,
         ServiceError,
         SessionParseError,
         SkillCompilerError,
