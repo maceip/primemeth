@@ -37,23 +37,23 @@ QWEN_SAMPLING: dict[QwenMode, dict[str, float | int]] = {
     },
 }
 
-QWEN_ROPE_PARAMETERS: dict[QwenContextProfile, dict[str, object]] = {
-    "native": {
-        "mrope_interleaved": True,
-        "mrope_section": [11, 11, 10],
-        "rope_type": "default",
-        "rope_theta": 10000000,
-        "partial_rotary_factor": 0.25,
-    },
-    "yarn-1m": {
-        "mrope_interleaved": True,
-        "mrope_section": [11, 11, 10],
-        "rope_type": "yarn",
-        "rope_theta": 10000000,
-        "partial_rotary_factor": 0.25,
-        "factor": 4.0,
-        "original_max_position_embeddings": 262144,
-    },
+# Model-card YaRN recipe (opt-in):
+# Emits an override targeted at text_config.rope_parameters.
+# Preserves the shipped keys (mrope_interleaved, mrope_section, partial_rotary_factor, rope_theta)
+# and sets rope_type='yarn', factor=4.0, original_max_position_embeddings=262144 (262144 x 4 = 1M).
+# Native profile emits nothing (shipped config untouched).
+QWEN_YARN_1M_ROPE_OVERRIDE: dict[str, object] = {
+    "text_config": {
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000,
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 262144,
+        }
+    }
 }
 
 
@@ -67,21 +67,29 @@ class QwenSettings:
         return QWEN_SAMPLING[self.mode]
 
     @property
-    def rope_parameters(self) -> dict[str, object]:
-        return QWEN_ROPE_PARAMETERS[self.context_profile]
+    def rope_override(self) -> dict[str, object] | None:
+        """Model-card YaRN recipe (opt-in) override targeted at text_config.rope_parameters; native emits None."""
+        if self.context_profile == "yarn-1m":
+            return QWEN_YARN_1M_ROPE_OVERRIDE
+        return None
 
     @property
     def max_context(self) -> int:
         return 1_048_576 if self.context_profile == "yarn-1m" else 262_144
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "mode": self.mode,
             "contextProfile": self.context_profile,
             "sampling": self.sampling,
-            "ropeParameters": self.rope_parameters,
             "maxContext": self.max_context,
         }
+        if self.context_profile == "yarn-1m":
+            data["ropeOverride"] = {
+                "recipe": "model-card YaRN recipe (opt-in)",
+                **QWEN_YARN_1M_ROPE_OVERRIDE,
+            }
+        return data
 
 
 

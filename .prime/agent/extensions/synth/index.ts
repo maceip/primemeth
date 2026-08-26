@@ -44,8 +44,8 @@ import {
 } from "./compiler.js";
 import {
 	loadSynthConfig,
-	QWEN_ROPE_PARAMETERS,
 	QWEN_SAMPLING,
+	QWEN_YARN_1M_ROPE_OVERRIDE,
 	resolveDataPlanePath,
 	type QwenConfig,
 	type QwenMode,
@@ -1708,8 +1708,19 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			for (const [key, val] of Object.entries(sampling)) {
 				payloadRecord[key] = val;
 			}
+			// Model-card YaRN recipe (opt-in): override targeted at text_config.rope_parameters.
+			// Native profile emits nothing (shipped config untouched).
 			if (qwenConfig.contextProfile === "yarn-1m") {
-				payloadRecord.rope_parameters = QWEN_ROPE_PARAMETERS["yarn-1m"];
+				const textConfig =
+					typeof payloadRecord.text_config === "object" && payloadRecord.text_config !== null
+						? (payloadRecord.text_config as Record<string, unknown>)
+						: {};
+				payloadRecord.text_config = {
+					...textConfig,
+					rope_parameters: {
+						...QWEN_YARN_1M_ROPE_OVERRIDE.text_config.rope_parameters,
+					},
+				};
 			}
 		}
 		const provider = latestProvider(runtime);

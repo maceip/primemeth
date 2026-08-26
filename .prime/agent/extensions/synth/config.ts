@@ -238,24 +238,26 @@ export const QWEN_SAMPLING: Record<QwenMode, {
 	},
 };
 
-export const QWEN_ROPE_PARAMETERS: Record<QwenContextProfile, Record<string, unknown>> = {
-	native: {
-		mrope_interleaved: true,
-		mrope_section: [11, 11, 10],
-		rope_type: "default",
-		rope_theta: 10000000,
-		partial_rotary_factor: 0.25,
+/**
+ * Model-card YaRN recipe (opt-in) override for 1M context:
+ * Targets text_config.rope_parameters while preserving shipped keys
+ * (mrope_interleaved, mrope_section, partial_rotary_factor, rope_theta)
+ * and setting rope_type='yarn', factor=4.0, original_max_position_embeddings=262144 (262144 x 4 = 1M).
+ * Native profile emits nothing (shipped config untouched).
+ */
+export const QWEN_YARN_1M_ROPE_OVERRIDE = {
+	text_config: {
+		rope_parameters: {
+			mrope_interleaved: true,
+			mrope_section: [11, 11, 10],
+			partial_rotary_factor: 0.25,
+			rope_theta: 10000000,
+			rope_type: "yarn",
+			factor: 4.0,
+			original_max_position_embeddings: 262144,
+		},
 	},
-	"yarn-1m": {
-		mrope_interleaved: true,
-		mrope_section: [11, 11, 10],
-		rope_type: "yarn",
-		rope_theta: 10000000,
-		partial_rotary_factor: 0.25,
-		factor: 4.0,
-		original_max_position_embeddings: 262144,
-	},
-};
+} as const;
 
 export const SYNTH_CONFIG_DEFAULTS: Omit<SynthConfig, "endpoint"> = {
 	telemetry: { dir: ".synth/telemetry" },
