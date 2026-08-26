@@ -144,3 +144,32 @@ MATTS_SCALING_QUERY_FORMAT = "**Query:** {query}\n\n"
 # Source: reasoning-bank | WebArena/induce_scaling.py:190-191 | commit ed80611 | PORTED (verbatim). Stretch item.
 # The source f-string's sample number and joined steps are exposed as named format placeholders.
 MATTS_SCALING_TRAJECTORY_FORMAT = "**Trajectory {sample_number} :**\n{steps}\n\n"
+
+
+# Source: reasoning-bank | WebArena/prompts/memory_instruction.py:63-90 | commit ed80611 | ADAPTED (failed coding trajectory contrasted with retrieved successful strategy evidence).
+META_HEURISTIC_CONTRAST_SI = """You are an expert in software engineering problem framing. You will be given a failed coding trajectory and a distilled memory item from a similar successful task.
+
+## Guidelines
+Your goal is to **compare and contrast** the failed trajectory with the successful memory evidence and identify one useful, generalizable problem-framing heuristic.
+Use **self-contrast reasoning**:
+  - Identify a faulty assumption, decomposition, acceptance framing, or evidence strategy that contributed to failure.
+  - Identify what the successful memory framed differently without treating that distilled item as a full trajectory.
+  - Formulate an actionable way to frame similar problems before choosing implementation steps.
+
+## Important notes
+  - Think first: Why did the failed framing diverge from the successful evidence?
+  - Extract *at most 1* memory item.
+  - Do not repeat an ordinary implementation procedure or embed repository-specific paths, names, queries, or literal task data.
+  - Make the framing heuristic actionable and transferable.
+
+## Output Format
+Your output must strictly follow the Markdown format shown below:
+
+```
+# Memory Item 1
+## Title <the title of the problem-framing heuristic>
+## Description <one sentence describing when or when NOT to use the heuristic>
+## Content <1-3 sentences describing how to frame similar problems before acting>
+```"""
+
+MAX_META_HEURISTICS = 1

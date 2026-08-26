@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
@@ -23,16 +25,31 @@ import {
 	injectBatsSystemPrompt,
 	shouldSendContinuationNudge,
 } from "./budget.js";
+import {
+	buildCompileMarker,
+	compilerArguments,
+	CompileSkillParameters,
+	createCompileRequest,
+	parseCompileMarker,
+	parseCompilerOutcome,
+	parsePersistedCompile,
+	persistCompile,
+	type CompileMarker,
+	type CompileRequest,
+	type PersistedCompile,
+} from "./compiler.js";
 import { loadSynthConfig, resolveDataPlanePath, type SynthConfig, type SynthConfigLoadResult } from "./config.js";
 import { controlPlaneBlockReason } from "./guard.js";
 import {
 	LESSONS_HEADING,
 	parseMemoryItems,
 	parsePersistedMemoryRetrieval,
+	PROBLEM_FRAMING_HEADING,
 	REASONING_BANK_TASK_DESCRIPTION,
 	renderLessons,
 	renderMemoryList,
 	renderMemorySearch,
+	renderProblemFraming,
 } from "./memory.js";
 import {
 	type BudgetSnapshot,
@@ -76,6 +93,23 @@ interface ProviderExchange {
 	status?: number;
 }
 
+interface CompilerJobPaths {
+	output: string;
+	error: string;
+}
+
+interface CompilerProcessResult {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	error?: Error;
+}
+
+interface DetachedCompilerJob {
+	pid?: number;
+	paths: CompilerJobPaths;
+	completion: Promise<CompilerProcessResult>;
+}
+
 interface SessionRuntime {
 	configLoad: SynthConfigLoadResult;
 	telemetry?: TelemetryWriter;
@@ -93,6 +127,8 @@ interface SessionRuntime {
 	memoryLookup?: Promise<void>;
 	memorySection?: string;
 	memoryItemIds: number[];
+	framingSection?: string;
+	framingItemIds: number[];
 	memoryPersisted: boolean;
 	distillEnqueued: boolean;
 	verifier?: VerifierClient;
@@ -100,6 +136,10 @@ interface SessionRuntime {
 	verificationCycles: number;
 	verificationInFlight: boolean;
 	latestVerification?: PersistedVerification;
+	compileRequests: Map<string, PersistedCompile>;
+	activeCompileRequest?: CompileRequest;
+	compileInFlight?: Promise<void>;
+	shuttingDown: boolean;
 }
 
 function errorMessage(error: unknown): string {
@@ -156,11 +196,14 @@ function createRuntime(cwd: string): SessionRuntime {
 		noToolCount: 0,
 		nudgePending: false,
 		memoryItemIds: [],
+		framingItemIds: [],
 		memoryPersisted: false,
 		distillEnqueued: false,
 		verifiedEntryIds: new Set(),
 		verificationCycles: 0,
 		verificationInFlight: false,
+		compileRequests: new Map(),
+		shuttingDown: false,
 	};
 }
 
@@ -280,6 +323,8 @@ function restorePersistedMemory(runtime: SessionRuntime, ctx: ExtensionContext):
 		runtime.taskQuery = persisted.taskQuery;
 		runtime.memorySection = persisted.section;
 		runtime.memoryItemIds = persisted.itemIds;
+		runtime.framingSection = persisted.framingSection;
+		runtime.framingItemIds = persisted.framingItemIds;
 		runtime.memoryPersisted = true;
 		runtime.memoryLookup = Promise.resolve();
 		return;
@@ -329,6 +374,110 @@ function restorePersistedVerifications(runtime: SessionRuntime, ctx: ExtensionCo
 		runtime.latestVerification = persisted;
 		runtime.taskQuery ??= persisted.task;
 	}
+}
+
+function restorePersistedCompiles(runtime: SessionRuntime, ctx: ExtensionContext): void {
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type !== "custom" || entry.customType !== "synth.skill.compile") {
+			continue;
+		}
+		const persisted = parsePersistedCompile(entry.data);
+		if (persisted) runtime.compileRequests.set(persisted.requestId, persisted);
+	}
+}
+
+function compileMarkerMatches(existing: PersistedCompile, marker: CompileMarker): boolean {
+	return (
+		existing.reason === marker.reason &&
+		existing.source === marker.source &&
+		existing.workflow === marker.workflow &&
+		existing.nameHint === marker.nameHint
+	);
+}
+
+function compileRequestFromPersisted(persisted: PersistedCompile): CompileRequest {
+	return {
+		requestId: persisted.requestId,
+		reason: persisted.reason,
+		source: persisted.source,
+		sessionFile: persisted.sessionFile,
+		sessionId: persisted.sessionId,
+		timestamp: persisted.timestamp,
+		...(persisted.workflow === undefined ? {} : { workflow: persisted.workflow }),
+		...(persisted.nameHint === undefined ? {} : { nameHint: persisted.nameHint }),
+	};
+}
+
+function compilerJobPaths(cwd: string, requestId: string): CompilerJobPaths {
+	const directory = resolveDataPlanePath(cwd, ".synth/compiler-jobs");
+	return {
+		output: join(directory, `${requestId}.json`),
+		error: join(directory, `${requestId}.stderr`),
+	};
+}
+
+function spawnDetachedCompiler(cwd: string, args: string[], paths: CompilerJobPaths): DetachedCompilerJob {
+	mkdirSync(dirname(paths.output), { recursive: true });
+	const outputFd = openSync(paths.output, "wx", 0o600);
+	let errorFd: number | undefined;
+	let child: ChildProcess;
+	try {
+		errorFd = openSync(paths.error, "wx", 0o600);
+		child = spawn("uv", args, {
+			cwd,
+			detached: true,
+			env: { ...process.env, UV_NO_PROGRESS: "1" },
+			stdio: ["ignore", outputFd, errorFd],
+		});
+	} finally {
+		closeSync(outputFd);
+		if (errorFd !== undefined) closeSync(errorFd);
+	}
+	const completion = new Promise<CompilerProcessResult>((resolveCompletion) => {
+		let settled = false;
+		const settle = (result: CompilerProcessResult): void => {
+			if (settled) return;
+			settled = true;
+			resolveCompletion(result);
+		};
+		child.once("error", (error) => settle({ code: null, signal: null, error }));
+		child.once("exit", (code, signal) => settle({ code, signal }));
+	});
+	child.unref();
+	return { ...(child.pid === undefined ? {} : { pid: child.pid }), paths, completion };
+}
+
+function processIsRunning(pid: number | undefined): boolean {
+	if (pid === undefined) return true;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function waitForRecoveredCompilerJob(job: DetachedCompilerJob): Promise<CompilerProcessResult> {
+	for (let attempt = 0; attempt < 1_800; attempt++) {
+		if (existsSync(job.paths.output)) {
+			const output = readFileSync(job.paths.output, "utf8").trim();
+			if (output) {
+				try {
+					parseCompilerOutcome(output);
+					return { code: null, signal: null };
+				} catch {
+					// The detached child may still be flushing its single JSON result.
+				}
+			}
+		}
+		if (!processIsRunning(job.pid)) return { code: null, signal: null };
+		await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+	}
+	return {
+		code: null,
+		signal: null,
+		error: new Error("detached Synth compiler did not finish within 180 seconds"),
+	};
 }
 
 export default function synthExtension(pi: ExtensionAPI): void {
@@ -384,6 +533,253 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			...(pointer ? { transcript: pointer } : {}),
 			data: { reason, ...data },
 		});
+	}
+
+	function persistCompileState(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		request: CompileRequest,
+		status: PersistedCompile["status"],
+		detail: Partial<PersistedCompile> = {},
+	): PersistedCompile {
+		const persisted = persistCompile(request, status, detail);
+		pi.appendEntry("synth.skill.compile", persisted);
+		runtime.compileRequests.set(request.requestId, persisted);
+		const pointer = transcript(ctx);
+		appendTelemetry(runtime, ctx, {
+			sessionId: ctx.sessionManager.getSessionId(),
+			kind: "bridge",
+			...(pointer ? { transcript: pointer } : {}),
+			...(status === "failed" ? { errorClass: "SkillCompilerFailed" } : {}),
+			data: {
+				action: `skill.compile.${status}`,
+				requestId: request.requestId,
+				source: request.source,
+				...(detail.name === undefined ? {} : { name: detail.name }),
+				...(detail.contentHash === undefined ? {} : { contentHash: detail.contentHash }),
+				...(detail.error === undefined ? {} : { error: detail.error }),
+			},
+		});
+		return persisted;
+	}
+
+	function admitCompile(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		marker: CompileMarker,
+	): { request?: CompileRequest; error?: string } {
+		const config = runtime.configLoad.config;
+		if (runtime.configLoad.state !== "loaded" || !config) {
+			return { error: "Synth configuration is unavailable." };
+		}
+		if (config.killSwitch.all || !config.skillCompiler.enabled) {
+			return { error: "Synth skill compilation is disabled." };
+		}
+		if (marker.requestId) {
+			const existing = runtime.compileRequests.get(marker.requestId);
+			if (!existing) return { error: "Synth compile marker references an unknown request." };
+			if (existing.status !== "scheduled") {
+				return { error: `Synth compile request ${marker.requestId} was already consumed.` };
+			}
+			if (!compileMarkerMatches(existing, marker)) {
+				return { error: "Synth compile marker does not match its persisted request." };
+			}
+			if (runtime.compileInFlight || runtime.activeCompileRequest) {
+				return { error: "Another Synth skill compilation is already active." };
+			}
+			const otherPending = [...runtime.compileRequests.values()].some(
+				(request) =>
+					request.requestId !== existing.requestId &&
+					(request.status === "scheduled" || request.status === "started"),
+			);
+			return otherPending
+				? { error: "Another Synth skill compilation is already pending." }
+				: { request: compileRequestFromPersisted(existing) };
+		}
+		if (
+			runtime.compileInFlight ||
+			runtime.activeCompileRequest ||
+			[...runtime.compileRequests.values()].some(
+				(request) => request.status === "scheduled" || request.status === "started",
+			)
+		) {
+			return { error: "Another Synth skill compilation is already active." };
+		}
+		if (runtime.compileRequests.size >= config.skillCompiler.maxPerSession) {
+			return {
+				error: `Synth skill compilation cap reached (${config.skillCompiler.maxPerSession} per session).`,
+			};
+		}
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			return { error: "Skill compilation requires a persisted session." };
+		}
+		const request = createCompileRequest(
+			marker,
+			sessionFile,
+			ctx.sessionManager.getSessionId(),
+		);
+		try {
+			persistCompileState(runtime, ctx, request, "scheduled");
+		} catch (error) {
+			return { error: `Could not persist the compiler request: ${errorMessage(error)}` };
+		}
+		return { request };
+	}
+
+	function queueCompile(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		marker: CompileMarker,
+	): string {
+		const admission = admitCompile(runtime, ctx, marker);
+		if (!admission.request) return admission.error ?? "Skill compilation was not scheduled.";
+		try {
+			pi.sendUserMessage(`/refine ${buildCompileMarker(admission.request)}`, { deliverAs: "followUp" });
+		} catch (error) {
+			persistCompileState(runtime, ctx, admission.request, "failed", {
+				error: `Could not enqueue native refinement: ${errorMessage(error)}`,
+			});
+			return `Synth skill compilation was not scheduled: ${errorMessage(error)}`;
+		}
+		return `Synth skill compilation scheduled (${admission.request.requestId}). Generation and gating run after the current turn.`;
+	}
+
+	function compilerFailure(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		request: CompileRequest,
+		error: unknown,
+	): void {
+		if (runtime.shuttingDown) return;
+		const detail = errorMessage(error);
+		try {
+			persistCompileState(runtime, ctx, request, "failed", { error: detail.slice(0, 2000) });
+		} catch {
+			// The Python audit and durable job files remain authoritative.
+		}
+		commandOutput(pi, `Synth skill compilation failed: ${detail}`);
+	}
+
+	function finishCompilerJob(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		request: CompileRequest,
+		job: DetachedCompilerJob,
+		result: CompilerProcessResult,
+	): void {
+		if (runtime.shuttingDown) return;
+		if (result.error) throw result.error;
+		if (result.signal !== null) throw new Error(`compiler terminated by signal ${result.signal}`);
+		const stdout = existsSync(job.paths.output) ? readFileSync(job.paths.output, "utf8").trim() : "";
+		const stderr = existsSync(job.paths.error) ? readFileSync(job.paths.error, "utf8").trim() : "";
+		if (!stdout) throw new Error(stderr || `compiler exited ${result.code ?? "without a receipt"}`);
+		const outcome = parseCompilerOutcome(stdout);
+		if (outcome.requestId !== request.requestId || outcome.sessionId !== request.sessionId) {
+			throw new Error("Synth compiler outcome does not match its durable request");
+		}
+		const expectedCode = outcome.status === "promoted" ? 0 : 1;
+		if (result.code !== null && result.code !== expectedCode) {
+			throw new Error(
+				`Synth compiler returned ${outcome.status} with inconsistent exit code ${result.code}`,
+			);
+		}
+		persistCompileState(runtime, ctx, request, outcome.status, {
+			...(outcome.name === null ? {} : { name: outcome.name }),
+			...(outcome.contentHash === null ? {} : { contentHash: outcome.contentHash }),
+			pid: job.pid,
+			jobOutput: job.paths.output,
+			jobError: job.paths.error,
+		});
+		commandOutput(
+			pi,
+			outcome.status === "promoted"
+				? `Synth promoted skill ${outcome.name ?? "unknown"} (${outcome.contentHash ?? "no hash"}). Run /synth reload-skills to provision it now, or start a new session.`
+				: `Synth rejected skill ${outcome.name ?? "unknown"}; inspect the quarantine audit for gate evidence.`,
+		);
+	}
+
+	async function executeCompiler(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		request: CompileRequest,
+	): Promise<void> {
+		const fixturePath = process.env.SYNTH_SKILL_FIXTURE;
+		try {
+			const paths = compilerJobPaths(ctx.cwd, request.requestId);
+			persistCompileState(runtime, ctx, request, "started", {
+				jobOutput: paths.output,
+				jobError: paths.error,
+			});
+			const job = spawnDetachedCompiler(
+				ctx.cwd,
+				compilerArguments(ctx.cwd, request, fixturePath),
+				paths,
+			);
+			persistCompileState(runtime, ctx, request, "started", {
+				...(job.pid === undefined ? {} : { pid: job.pid }),
+				jobOutput: paths.output,
+				jobError: paths.error,
+			});
+			finishCompilerJob(runtime, ctx, request, job, await job.completion);
+		} catch (error) {
+			compilerFailure(runtime, ctx, request, error);
+		}
+	}
+
+	async function reconcileCompiler(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		persisted: PersistedCompile,
+	): Promise<void> {
+		const request = compileRequestFromPersisted(persisted);
+		const paths = compilerJobPaths(ctx.cwd, request.requestId);
+		const job: DetachedCompilerJob = {
+			...(persisted.pid === undefined ? {} : { pid: persisted.pid }),
+			paths,
+			completion: Promise.resolve({ code: null, signal: null }),
+		};
+		try {
+			finishCompilerJob(runtime, ctx, request, job, await waitForRecoveredCompilerJob(job));
+		} catch (error) {
+			compilerFailure(runtime, ctx, request, error);
+		}
+	}
+
+	function launchCompiler(runtime: SessionRuntime, ctx: ExtensionContext, request: CompileRequest): void {
+		const task = executeCompiler(runtime, ctx, request);
+		runtime.compileInFlight = task;
+		void task.then(
+			() => {
+				if (runtime.compileInFlight === task) runtime.compileInFlight = undefined;
+			},
+			() => {
+				if (runtime.compileInFlight === task) runtime.compileInFlight = undefined;
+			},
+		);
+	}
+
+	function resumePersistedCompiler(runtime: SessionRuntime, ctx: ExtensionContext): void {
+		const started = [...runtime.compileRequests.values()].find((request) => request.status === "started");
+		if (started) {
+			const task = reconcileCompiler(runtime, ctx, started);
+			runtime.compileInFlight = task;
+			void task.then(
+				() => {
+					if (runtime.compileInFlight === task) runtime.compileInFlight = undefined;
+				},
+				() => {
+					if (runtime.compileInFlight === task) runtime.compileInFlight = undefined;
+				},
+			);
+			return;
+		}
+		const scheduled = [...runtime.compileRequests.values()].find((request) => request.status === "scheduled");
+		if (scheduled && runtime.configLoad.config?.skillCompiler.enabled) {
+			pi.sendUserMessage(`/refine ${buildCompileMarker(compileRequestFromPersisted(scheduled))}`, {
+				deliverAs: "followUp",
+			});
+		}
 	}
 
 	function bridgeFor(runtime: SessionRuntime, ctx: ExtensionContext): BridgeClient | undefined {
@@ -545,6 +941,24 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		runtime.memoryLookup = (async () => {
+			let strategyItems: ReturnType<typeof parseMemoryItems> = [];
+			let framingItems: ReturnType<typeof parseMemoryItems> = [];
+			const retrievalFailure = (category: "lessons" | "framing", error: unknown): void => {
+				warn(
+					runtime,
+					ctx,
+					`memory-${category}`,
+					`ReasoningBank ${category} retrieval unavailable; continuing without that section: ${errorMessage(error)}`,
+				);
+				const pointer = transcript(ctx);
+				appendTelemetry(runtime, ctx, {
+					sessionId: ctx.sessionManager.getSessionId(),
+					kind: "bridge",
+					...(pointer ? { transcript: pointer } : {}),
+					errorClass: "MemoryRetrievalUnavailable",
+					data: { action: `memory.${category}_retrieval_failed` },
+				});
+			};
 			try {
 				const response = await client.request("memory.query", {
 					query: runtime.taskQuery,
@@ -554,18 +968,41 @@ export default function synthExtension(pi: ExtensionAPI): void {
 					statuses: ["success", "fail"],
 					itemTypes: ["strategy"],
 				});
-				const items = parseMemoryItems(response, true);
-				const section = renderLessons(items);
-				if (!section) {
-					return;
-				}
+				strategyItems = parseMemoryItems(response, true).filter((item) => item.itemType === "strategy");
+			} catch (error) {
+				retrievalFailure("lessons", error);
+			}
+			try {
+				const framingResponse = await client.request("memory.query", {
+					query: runtime.taskQuery,
+					taskDescription:
+						"Given prior contrastive problem-framing memories, select the most relevant heuristic for framing the current software engineering task before acting.",
+					k: 1,
+					minScore: config.memory.minScore,
+					statuses: ["fail"],
+					itemTypes: ["meta_heuristic"],
+				});
+				framingItems = parseMemoryItems(framingResponse, true)
+					.filter((item) => item.itemType === "meta_heuristic" && item.status === "fail")
+					.slice(0, 1);
+			} catch (error) {
+				retrievalFailure("framing", error);
+			}
+			try {
+				const section = renderLessons(strategyItems);
+				const framingSection = renderProblemFraming(framingItems);
+				if (!section && !framingSection) return;
 				runtime.memorySection = section;
-				runtime.memoryItemIds = items.map((item) => item.id);
+				runtime.memoryItemIds = strategyItems.map((item) => item.id);
+				runtime.framingSection = framingSection;
+				runtime.framingItemIds = framingItems.map((item) => item.id);
 				if (!runtime.memoryPersisted) {
 					pi.appendEntry("synth.memory.retrieval", {
 						taskQuery: runtime.taskQuery,
-						section,
+						...(section ? { section } : {}),
 						itemIds: runtime.memoryItemIds,
+						...(framingSection ? { framingSection } : {}),
+						framingItemIds: runtime.framingItemIds,
 						timestamp: Date.now(),
 					});
 					runtime.memoryPersisted = true;
@@ -575,18 +1012,14 @@ export default function synthExtension(pi: ExtensionAPI): void {
 					sessionId: ctx.sessionManager.getSessionId(),
 					kind: "bridge",
 					...(pointer ? { transcript: pointer } : {}),
-					data: { action: "memory.retrieved", itemIds: runtime.memoryItemIds },
+					data: {
+						action: "memory.retrieved",
+						itemIds: runtime.memoryItemIds,
+						framingItemIds: runtime.framingItemIds,
+					},
 				});
 			} catch (error) {
-				warn(runtime, ctx, "memory", `ReasoningBank retrieval unavailable; continuing without lessons: ${errorMessage(error)}`);
-				const pointer = transcript(ctx);
-				appendTelemetry(runtime, ctx, {
-					sessionId: ctx.sessionManager.getSessionId(),
-					kind: "bridge",
-					...(pointer ? { transcript: pointer } : {}),
-					errorClass: "MemoryRetrievalUnavailable",
-					data: { action: "memory.retrieval_failed" },
-				});
+				retrievalFailure("lessons", error);
 			}
 		})();
 		await runtime.memoryLookup;
@@ -673,6 +1106,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			`telemetry=${runtime.telemetry?.path ?? "off"}`,
 			bridgeLine,
 			`memory=${config.memory.enabled ? "configured" : "off"}`,
+			`skillCompiler=${config.skillCompiler.enabled ? "configured" : "off"} admitted=${runtime.compileRequests.size}/${config.skillCompiler.maxPerSession} active=${runtime.compileInFlight ? "yes" : "no"}`,
 			`budgets=${formatBudgets(config, runtime.budget)}`,
 		].join("\n");
 	}
@@ -709,10 +1143,43 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	pi.registerTool({
+		name: "compile_skill",
+		label: "Compile Skill",
+		description:
+			"Schedule a recurring multi-step workflow for local generation, deterministic quarantine gating, and promotion as a Python-backed project skill. Use only after the workflow has repeated and stabilized.",
+		promptGuidelines: [
+			"Call compile_skill only for a reusable workflow with at least two nontrivial steps.",
+			"Compilation runs after the turn and may be rejected; never claim promotion from the scheduling receipt.",
+		],
+		parameters: CompileSkillParameters,
+		executionMode: "sequential",
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			const result = queueCompile(runtimeFor(ctx), ctx, {
+				workflow: params.workflow,
+				...(params.nameHint === undefined ? {} : { nameHint: params.nameHint }),
+				reason: params.reason,
+				source: "tool",
+			});
+			return {
+				content: [{ type: "text", text: result }],
+				details: { scheduled: result.startsWith("Synth skill compilation scheduled") },
+			};
+		},
+	});
+
 	pi.registerCommand("synth", {
-		description: "Show Synth status, memory, or budget state",
+		description: "Show Synth state or manage memory, budgets, and compiled skills",
 		getArgumentCompletions: (prefix) => {
-			const commands = ["status", "memory list", "memory search ", "budget"];
+			const commands = [
+				"status",
+				"memory list",
+				"memory search ",
+				"budget",
+				"compile ",
+				"reload-skills",
+				"demote ",
+			];
 			const matches = commands.filter((command) => command.startsWith(prefix));
 			return matches.length > 0 ? matches.map((command) => ({ value: command, label: command })) : null;
 		},
@@ -739,7 +1206,72 @@ export default function synthExtension(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			commandOutput(pi, "Usage: /synth [status|memory list|memory search <query>|budget]");
+			if (subcommand === "compile") {
+				const workflow = rest.join(" ").trim();
+				if (workflow && workflow.length < 20) {
+					commandOutput(pi, "A supplied workflow must contain at least 20 characters.");
+					return;
+				}
+				commandOutput(
+					pi,
+					queueCompile(runtime, ctx, {
+						...(workflow ? { workflow } : {}),
+						reason: workflow
+							? "User requested compilation of the described recurring workflow"
+							: "User requested telemetry mining for a recurring workflow",
+						source: "command",
+					}),
+				);
+				return;
+			}
+			if (subcommand === "reload-skills") {
+				if (
+					runtime.compileInFlight ||
+					[...runtime.compileRequests.values()].some(
+						(request) => request.status === "scheduled" || request.status === "started",
+					)
+				) {
+					commandOutput(pi, "Synth cannot reload while a compiler job is pending; wait for its terminal receipt.");
+					return;
+				}
+				commandOutput(pi, "Reloading Synth skills and kernel provisioning...");
+				await ctx.reload();
+				return;
+			}
+			if (subcommand === "demote") {
+				const name = rest.join(" ").trim();
+				if (!name) {
+					commandOutput(pi, "Usage: /synth demote <skill-name>");
+					return;
+				}
+				const result = await pi.exec(
+					"uv",
+					[
+						"run",
+						"--project",
+						ctx.cwd,
+						"--no-sync",
+						"synth",
+						"skill",
+						"demote",
+						name,
+						"--reason",
+						"Requested through /synth demote",
+					],
+					{ cwd: ctx.cwd, timeout: 30_000, env: { UV_NO_PROGRESS: "1" } },
+				);
+				if (result.code !== 0) {
+					commandOutput(pi, `Synth demotion failed: ${(result.stderr || result.stdout).trim()}`);
+					return;
+				}
+				commandOutput(pi, result.stdout.trim() || `Synth demoted ${name}.`);
+				await ctx.reload();
+				return;
+			}
+			commandOutput(
+				pi,
+				"Usage: /synth [status|memory list|memory search <query>|budget|compile [workflow]|reload-skills|demote <name>]",
+			);
 		},
 	});
 
@@ -754,8 +1286,9 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.configLoad.state !== "loaded" || !config || config.killSwitch.all) {
 			return;
 		}
-		restorePersistedMemory(runtime, ctx);
+		if (config.memory.enabled) restorePersistedMemory(runtime, ctx);
 		restorePersistedVerifications(runtime, ctx);
+		restorePersistedCompiles(runtime, ctx);
 		runtime.taskQuery ??= firstTaskFromBranch(ctx);
 		runtime.initialBudgetInjected = ctx.sessionManager
 			.getBranch()
@@ -788,6 +1321,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { reason: event.reason, configPath: runtime.configLoad.path },
 		});
 		persistBudget(runtime, ctx, "session_start", { restored: event.reason === "resume" });
+		resumePersistedCompiler(runtime, ctx);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -836,11 +1370,68 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		}
 	});
 
+	pi.on("session_before_refine", (event, ctx) => {
+		const runtime = runtimeFor(ctx);
+		let marker: CompileMarker | undefined;
+		try {
+			marker = parseCompileMarker(event.preparation.instructions);
+		} catch (error) {
+			warn(runtime, ctx, "skill-compile-marker", errorMessage(error));
+			return {
+				proposal: {
+					summary: "Rejected invalid Synth skill compilation marker",
+					rationale: "The marker did not satisfy the strict local compiler protocol.",
+					expectedOutcome: "No compiler work is started.",
+					edits: [],
+				},
+			};
+		}
+		if (!marker) return undefined;
+		const admission = admitCompile(runtime, ctx, marker);
+		if (!admission.request) {
+			warn(runtime, ctx, "skill-compile-admission", admission.error ?? "skill compilation was rejected");
+			return {
+				proposal: {
+					summary: "Rejected Synth skill compilation request",
+					rationale: admission.error ?? "The request could not be admitted safely.",
+					expectedOutcome: "No compiler work is started.",
+					edits: [],
+				},
+			};
+		}
+		runtime.activeCompileRequest = admission.request;
+		return {
+			proposal: {
+				summary: `Scheduled Synth skill compilation ${admission.request.requestId}`,
+				rationale:
+					"A zero-edit refinement receipt serializes the compiler with native HarnessState mutation.",
+				expectedOutcome:
+					"The Synth CLI generates, gates, audits, and promotes at most one quarantined package.",
+				edits: [],
+			},
+		};
+	});
+
+	pi.on("refine_complete", (event, ctx) => {
+		const runtime = runtimeFor(ctx);
+		const request = runtime.activeCompileRequest;
+		if (
+			!request ||
+			runtime.compileInFlight ||
+			event.summary !== `Scheduled Synth skill compilation ${request.requestId}`
+		) {
+			return;
+		}
+		runtime.activeCompileRequest = undefined;
+		launchCompiler(runtime, ctx, request);
+	});
+
 	pi.on("session_shutdown", async (event, ctx) => {
 		const runtime = runtimes.get(ctx.sessionManager);
 		if (!runtime) {
 			return;
 		}
+		runtime.shuttingDown = true;
 		persistBudget(runtime, ctx, "session_shutdown");
 		const pointer = transcript(ctx);
 		appendTelemetry(runtime, ctx, {
@@ -876,11 +1467,15 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			? injectBatsSystemPrompt(event.systemPrompt, runtime.budget.snapshot())
 			: event.systemPrompt;
 		await loadMemoryForTask(runtime, ctx, event.prompt);
-		const memorySection = runtime.memorySection;
+		const sections: string[] = [];
+		if (runtime.memorySection && !systemPrompt.includes(LESSONS_HEADING)) {
+			sections.push(runtime.memorySection);
+		}
+		if (runtime.framingSection && !systemPrompt.includes(PROBLEM_FRAMING_HEADING)) {
+			sections.push(runtime.framingSection);
+		}
 		const combined =
-			memorySection && !systemPrompt.includes(LESSONS_HEADING)
-				? `${systemPrompt.trimEnd()}\n\n${memorySection}`
-				: systemPrompt;
+			sections.length > 0 ? `${systemPrompt.trimEnd()}\n\n${sections.join("\n\n")}` : systemPrompt;
 		return combined === event.systemPrompt ? undefined : { systemPrompt: combined };
 	});
 

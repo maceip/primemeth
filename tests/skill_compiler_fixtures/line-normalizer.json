@@ -1,0 +1,10 @@
+{
+  "name": "synth-line-normalizer",
+  "reflection": "Repeated inspection steps normalized command output before comparing evidence. This skill isolates that deterministic transformation without retaining repository-specific literals.",
+  "files": {
+    "SKILL.md": "---\nname: synth-line-normalizer\ndescription: Normalize captured output lines for deterministic comparison. Use when repeated tool output needs whitespace cleanup. Do not use when whitespace or blank lines carry semantic meaning.\n---\n\n# Synth Line Normalizer\n\nCall `synth_line_normalizer.run()` with captured text lines before deterministic comparison.\n",
+    "pyproject.toml": "[project]\nname = \"synth-line-normalizer\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\ndependencies = []\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"src/synth_line_normalizer\"]\n",
+    "src/synth_line_normalizer/__init__.py": "def run(lines: list[str], *, drop_empty: bool = True) -> list[str]:\n    \"\"\"Strip surrounding whitespace and optionally remove empty lines.\"\"\"\n    normalized = [line.strip() for line in lines]\n    return [line for line in normalized if line] if drop_empty else normalized\n",
+    "tests/test_synth_line_normalizer.py": "from synth_line_normalizer import run\n\n\ndef test_run_strips_and_drops_empty_lines() -> None:\n    assert run([\"  first \", \"  \", \"second\"]) == [\"first\", \"second\"]\n\n\ndef test_run_can_preserve_empty_lines() -> None:\n    assert run([\" first \", \"  \"], drop_empty=False) == [\"first\", \"\"]\n"
+  }
+}

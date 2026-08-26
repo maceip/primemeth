@@ -48,7 +48,7 @@ if [[ ! -x "${tsx_path}" ]]; then
 	exit 1
 fi
 
-uv python install 3.12 --managed-python
+uv python install 3.11 3.12 --managed-python
 UV_PROJECT_ENVIRONMENT="${synth_root}/.venv" \
 	uv sync \
 		--project "${synth_root}" \
@@ -106,6 +106,27 @@ print(
     f"dimension={offline_dimension} cache={cache_dir}"
 )
 PY
+
+skill_gate_cache_dir="${synth_root}/.synth/skill-gate-uv-cache"
+skill_gate_fixture="${synth_root}/tests/skill_gate_fixtures/good-skill"
+mkdir -p "${skill_gate_cache_dir}"
+UV_CACHE_DIR="${skill_gate_cache_dir}" UV_NO_PROGRESS=1 \
+	uv run --quiet --no-progress --color never --no-project --no-config \
+		--isolated --python 3.11 --managed-python --with ruff==0.16.4 \
+		ruff --version >/dev/null
+UV_CACHE_DIR="${skill_gate_cache_dir}" UV_NO_PROGRESS=1 \
+	uv run --quiet --no-progress --color never --no-project --no-config \
+		--isolated --python 3.11 --managed-python --with pytest==9.1.1 \
+		--with "${skill_gate_fixture}" pytest --version >/dev/null
+UV_CACHE_DIR="${skill_gate_cache_dir}" UV_NO_PROGRESS=1 UV_OFFLINE=1 \
+	uv run --quiet --no-progress --color never --no-project --no-config \
+		--isolated --python 3.11 --managed-python --with ruff==0.16.4 \
+		ruff --version >/dev/null
+UV_CACHE_DIR="${skill_gate_cache_dir}" UV_NO_PROGRESS=1 UV_OFFLINE=1 \
+	uv run --quiet --no-progress --color never --no-project --no-config \
+		--isolated --python 3.11 --managed-python --with pytest==9.1.1 \
+		--with "${skill_gate_fixture}" pytest --version >/dev/null
+printf 'setup-offline: skill gate ready python=3.11 cache=%s\n' "${skill_gate_cache_dir}"
 
 node "${script_dir}/merge-local-models.mjs"
 printf 'setup-offline: ready overlay=%s\n' "${overlay_python}"

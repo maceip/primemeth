@@ -13,7 +13,7 @@ from local_memory.embedder import EmbeddingBatch
 from local_memory.judge import JudgeResponseError, JudgeVerdict, TrajectoryJudge
 from local_memory.prompts_reasoning_bank import FAILED_SI, SUCCESSFUL_SI
 from local_memory.retrieval import MemoryRetriever
-from local_memory.store import MemoryStatus, MemoryStore, NewMemory
+from local_memory.store import MemoryItemType, MemoryStatus, MemoryStore, NewMemory
 
 
 class SemanticStubEmbedder:
@@ -41,6 +41,7 @@ def new_memory(
     *,
     status: MemoryStatus = "success",
     session_id: str = "session-1",
+    item_type: MemoryItemType = "strategy",
 ) -> NewMemory:
     assert status in ("success", "fail")
     return NewMemory(
@@ -48,7 +49,7 @@ def new_memory(
         description=f"Description for {title}",
         content=f"Content for {title}",
         status=status,
-        item_type="strategy",
+        item_type=item_type,
         task_query=f"Task for {title}",
         session_id=session_id,
         template_key="fixture-template",
@@ -97,13 +98,17 @@ def test_embedding_dedup_threshold_skips_near_and_inserts_far(
         original = deduplicator.add(new_memory("base-memory"))
         near = deduplicator.add(new_memory("near-memory"))
         far = deduplicator.add(new_memory("far-memory"))
+        framing = deduplicator.add(
+            new_memory("near-memory", item_type="meta_heuristic")
+        )
 
         assert original.action == "inserted"
         assert near.action == "skipped"
         assert near.duplicate_id == original.item.id
         assert near.similarity == pytest.approx(0.9798, abs=0.001)
         assert far.action == "inserted"
-        assert len(store.list()) == 2
+        assert framing.action == "inserted"
+        assert len(store.list()) == 3
 
 
 def test_dedup_merge_updates_content_without_duplicating_provenance(

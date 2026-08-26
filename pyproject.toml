@@ -26,12 +26,12 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["synth", "local_memory", "middleware", "optimizer"]
+packages = ["synth", "local_memory", "middleware", "optimizer", "compiler"]
 
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-src = ["synth", "local_memory", "middleware", "optimizer", "tests"]
+src = ["synth", "local_memory", "middleware", "optimizer", "compiler", "tests"]
 extend-exclude = ["optimizer/vendor/autosaddler_v2"]
 
 [tool.ruff.lint]
@@ -45,7 +45,7 @@ select = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["synth", "local_memory", "middleware", "optimizer"]
+known-first-party = ["synth", "local_memory", "middleware", "optimizer", "compiler"]
 
 [tool.ruff.lint.per-file-ignores]
 "local_memory/prompts_reasoning_bank.py" = ["E501"]
@@ -62,7 +62,7 @@ pythonpath = ["."]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["synth", "local_memory", "middleware", "optimizer"]
+packages = ["synth", "local_memory", "middleware", "optimizer", "compiler"]
 exclude = "^optimizer/vendor/autosaddler_v2/"
 
 [[tool.mypy.overrides]]

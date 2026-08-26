@@ -13,6 +13,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from local_memory.prompts_reasoning_bank import (
     AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT,
+    META_HEURISTIC_CONTRAST_SI,
 )
 from synth.config import SynthSettings
 
@@ -53,12 +54,16 @@ def _model_id(settings: SynthSettings) -> str:
     return configured
 
 
-def local_model_callable(settings: SynthSettings) -> Callable[[str, str], str]:
+def local_model_callable(
+    settings: SynthSettings,
+    *,
+    model_id: str | None = None,
+) -> Callable[[str, str], str]:
     endpoint = settings.endpoint
     if endpoint is None:
         raise ModelCallError("endpoint is required for ReasoningBank model calls")
     completion_url = _completion_url(endpoint.base_url)
-    model = _model_id(settings)
+    model = model_id or _model_id(settings)
     opener = build_opener(ProxyHandler({}))
 
     def call(system_prompt: str, prompt: str) -> str:
@@ -119,19 +124,29 @@ def fixture_model_callable(path: Path) -> Callable[[str, str], str]:
         raw: object = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ModelCallError(f"cannot read memory fixture {path}: {error}") from error
-    if not isinstance(raw, dict) or set(raw) != {"judge", "distill"}:
-        raise ModelCallError("memory fixture must contain exactly judge and distill")
+    if not isinstance(raw, dict) or set(raw) not in (
+        {"judge", "distill"},
+        {"judge", "distill", "meta"},
+    ):
+        raise ModelCallError(
+            "memory fixture must contain judge and distill, with optional meta"
+        )
     values = cast(dict[str, object], raw)
     judge = values["judge"]
     distill = values["distill"]
+    meta = values.get("meta", distill)
     if not isinstance(judge, str) or not judge.strip():
         raise ModelCallError("memory fixture judge must be a nonempty string")
     if not isinstance(distill, str) or not distill.strip():
         raise ModelCallError("memory fixture distill must be a nonempty string")
+    if not isinstance(meta, str) or not meta.strip():
+        raise ModelCallError("memory fixture meta must be a nonempty string")
 
     def call(system_prompt: str, _prompt: str) -> str:
         if system_prompt == AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT:
             return judge
+        if system_prompt == META_HEURISTIC_CONTRAST_SI:
+            return meta
         return distill
 
     return call

@@ -2,8 +2,11 @@ export const REASONING_BANK_TASK_DESCRIPTION =
 	"Given prior software engineering memories, analyze the current task's intent and select relevant strategies or lessons that could help resolve it.";
 
 export const LESSONS_HEADING = "## Lessons from past sessions";
+export const PROBLEM_FRAMING_HEADING = "## Problem framing";
 const LESSONS_PREAMBLE =
 	"These lessons were auto-distilled from prior sessions and are distinct from user-curated HarnessState memory. Use them only when relevant.";
+const PROBLEM_FRAMING_PREAMBLE =
+	"These contrastive heuristics were induced from a failed session and similar successful memory. Use them to frame the problem before selecting implementation steps.";
 
 export interface MemoryItem {
 	id: number;
@@ -21,8 +24,10 @@ export interface MemoryItem {
 
 export interface PersistedMemoryRetrieval {
 	taskQuery: string;
-	section: string;
+	section?: string;
 	itemIds: number[];
+	framingSection?: string;
+	framingItemIds: number[];
 	timestamp: number;
 }
 
@@ -96,6 +101,16 @@ export function renderLessons(items: readonly MemoryItem[]): string | undefined 
 	return `${LESSONS_HEADING}\n${LESSONS_PREAMBLE}\n\n${rendered.join("\n\n")}`;
 }
 
+export function renderProblemFraming(items: readonly MemoryItem[]): string | undefined {
+	const heuristics = items.filter((item) => item.itemType === "meta_heuristic").slice(0, 1);
+	if (heuristics.length === 0) return undefined;
+	const rendered = heuristics.map(
+		(item) =>
+			`### Framing Heuristic\nStatus: ${item.status}\nTitle: ${item.title}\nDescription: ${item.description}\nContent: ${item.content}`,
+	);
+	return `${PROBLEM_FRAMING_HEADING}\n${PROBLEM_FRAMING_PREAMBLE}\n\n${rendered.join("\n\n")}`;
+}
+
 export function renderMemoryList(items: readonly MemoryItem[]): string {
 	if (items.length === 0) {
 		return "Synth memory list\nNo stored memories.";
@@ -125,19 +140,38 @@ export function parsePersistedMemoryRetrieval(value: unknown): PersistedMemoryRe
 		!isRecord(value) ||
 		typeof value.taskQuery !== "string" ||
 		!value.taskQuery ||
-		typeof value.section !== "string" ||
-		!value.section.startsWith(LESSONS_HEADING) ||
-		!Array.isArray(value.itemIds) ||
-		!value.itemIds.every((id) => Number.isSafeInteger(id) && Number(id) > 0) ||
 		typeof value.timestamp !== "number" ||
 		!Number.isFinite(value.timestamp)
 	) {
 		return undefined;
 	}
+	const section =
+		typeof value.section === "string" && value.section.startsWith(LESSONS_HEADING)
+			? value.section
+			: undefined;
+	const framingSection =
+		typeof value.framingSection === "string" && value.framingSection.startsWith(PROBLEM_FRAMING_HEADING)
+			? value.framingSection
+			: undefined;
+	if (!Array.isArray(value.itemIds)) return undefined;
+	if (value.framingItemIds !== undefined && !Array.isArray(value.framingItemIds)) return undefined;
+	const itemIds = value.itemIds;
+	const framingItemIds = value.framingItemIds ?? [];
+	if (
+		(!section && !framingSection) ||
+		!itemIds.every((id) => Number.isSafeInteger(id) && Number(id) > 0) ||
+		!framingItemIds.every((id) => Number.isSafeInteger(id) && Number(id) > 0) ||
+		Boolean(section) !== (itemIds.length > 0) ||
+		Boolean(framingSection) !== (framingItemIds.length > 0)
+	) {
+		return undefined;
+	}
 	return {
 		taskQuery: value.taskQuery,
-		section: value.section,
-		itemIds: value.itemIds.map(Number),
+		...(section ? { section } : {}),
+		itemIds: itemIds.map(Number),
+		...(framingSection ? { framingSection } : {}),
+		framingItemIds: framingItemIds.map(Number),
 		timestamp: value.timestamp,
 	};
 }

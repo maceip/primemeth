@@ -32,7 +32,7 @@
 	},
 	"optimizer": { "config": "optimizer/configs/synth_local.yaml" },
 	"skillCompiler": {
-		"enabled": false,
+		"enabled": true,
 		"maxPerSession": 2,
 		"quarantine": ".synth/quarantine"
 	},

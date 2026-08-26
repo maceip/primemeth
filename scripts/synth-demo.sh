@@ -14,6 +14,7 @@ phase2_driver_path="${script_dir}/synth-phase2-demo.ts"
 phase3_driver_path="${script_dir}/synth-phase3-demo.ts"
 phase4_driver_path="${script_dir}/synth-phase4-demo.ts"
 phase5_driver_path="${script_dir}/synth-phase5-demo.ts"
+phase7_driver_path="${script_dir}/synth-phase7-demo.ts"
 wiring_script="${script_dir}/check-wiring.sh"
 
 for required_command in git node npm perl tmux; do
@@ -81,6 +82,7 @@ for required_file in \
 	"${phase3_driver_path}" \
 	"${phase4_driver_path}" \
 	"${phase5_driver_path}" \
+	"${phase7_driver_path}" \
 	"${wiring_script}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
@@ -876,6 +878,13 @@ printf 'synth-demo: Phase 4 two-session ReasoningBank loop PASS\n'
 	"${tsx_path}" "${phase5_driver_path}"
 )
 printf 'synth-demo: Phase 5 strategic verifier and hybrid batch PASS\n'
+
+(
+	cd "${synth_root}"
+	TSX_TSCONFIG_PATH="${synth_root}/tsconfig.base.json" \
+		"${tsx_path}" "${phase7_driver_path}"
+)
+printf 'synth-demo: Phase 7 dynamic skill compiler and problem framing PASS\n'
 
 bridge_output="$({
 	printf '%s\n' 'not-json'

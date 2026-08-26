@@ -21,6 +21,11 @@ class EndpointSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class TelemetrySettings:
+    directory: Path
+
+
+@dataclass(frozen=True, slots=True)
 class MemorySettings:
     enabled: bool
     top_k: int
@@ -40,11 +45,20 @@ class VerifierSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillCompilerSettings:
+    enabled: bool
+    max_per_session: int
+    quarantine_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class SynthSettings:
     workspace: Path
     endpoint: EndpointSettings | None
+    telemetry: TelemetrySettings
     memory: MemorySettings
     verifier: VerifierSettings
+    skill_compiler: SkillCompilerSettings
     kill_switch: bool
 
 
@@ -59,9 +73,11 @@ _TOP_LEVEL_KEYS = {
     "killSwitch",
 }
 _ENDPOINT_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
+_TELEMETRY_KEYS = {"dir"}
 _MEMORY_KEYS = {"enabled", "k", "minScore", "db", "embedModel", "judgeModel"}
 _VERIFIER_KEYS = {"interactive", "batch", "maxCycles", "contGen"}
 _CONTINUE_GENERATION_KEYS = {"enabled", "minBudgetFrac"}
+_SKILL_COMPILER_KEYS = {"enabled", "maxPerSession", "quarantine"}
 
 
 def _object(value: object, label: str) -> dict[str, object]:
@@ -138,6 +154,20 @@ def _endpoint(value: object) -> EndpointSettings:
     )
 
 
+def _telemetry(workspace: Path, value: object | None) -> TelemetrySettings:
+    if value is None:
+        return TelemetrySettings(
+            directory=resolve_data_plane_path(workspace, ".synth/telemetry")
+        )
+    mapping = _object(value, "telemetry")
+    _exact_keys(mapping, _TELEMETRY_KEYS, "telemetry")
+    return TelemetrySettings(
+        directory=resolve_data_plane_path(
+            workspace, _string(mapping["dir"], "telemetry.dir")
+        )
+    )
+
+
 def _memory(workspace: Path, value: object | None) -> MemorySettings:
     if value is None:
         return MemorySettings(
@@ -196,6 +226,34 @@ def _verifier(value: object | None) -> VerifierSettings:
     )
 
 
+def _skill_compiler(
+    workspace: Path, value: object | None, *, enabled_default: bool
+) -> SkillCompilerSettings:
+    if value is None:
+        return SkillCompilerSettings(
+            enabled=enabled_default,
+            max_per_session=2,
+            quarantine_path=resolve_data_plane_path(
+                workspace, ".synth/quarantine"
+            ),
+        )
+    mapping = _object(value, "skillCompiler")
+    _exact_keys(mapping, _SKILL_COMPILER_KEYS, "skillCompiler")
+    return SkillCompilerSettings(
+        enabled=_boolean(mapping["enabled"], "skillCompiler.enabled"),
+        max_per_session=_integer(
+            mapping["maxPerSession"],
+            "skillCompiler.maxPerSession",
+            minimum=0,
+            maximum=20,
+        ),
+        quarantine_path=resolve_data_plane_path(
+            workspace,
+            _string(mapping["quarantine"], "skillCompiler.quarantine"),
+        ),
+    )
+
+
 def load_synth_settings(workspace: Path) -> SynthSettings:
     resolved_workspace = workspace.resolve()
     path = resolved_workspace / "synth.json"
@@ -203,8 +261,12 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
         return SynthSettings(
             workspace=resolved_workspace,
             endpoint=None,
+            telemetry=_telemetry(resolved_workspace, None),
             memory=_memory(resolved_workspace, None),
             verifier=_verifier(None),
+            skill_compiler=_skill_compiler(
+                resolved_workspace, None, enabled_default=False
+            ),
             kill_switch=False,
         )
     if not path.is_file():
@@ -228,7 +290,13 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
     return SynthSettings(
         workspace=resolved_workspace,
         endpoint=endpoint,
+        telemetry=_telemetry(resolved_workspace, mapping.get("telemetry")),
         memory=_memory(resolved_workspace, mapping.get("memory")),
         verifier=_verifier(mapping.get("verifier")),
+        skill_compiler=_skill_compiler(
+            resolved_workspace,
+            mapping.get("skillCompiler"),
+            enabled_default=False,
+        ),
         kill_switch=kill_switch,
     )

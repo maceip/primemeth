@@ -1,0 +1,1 @@
+- Fixed source-mode extension loading when an extension imports the coding-agent API after MCP support is registered.

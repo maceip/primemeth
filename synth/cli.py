@@ -8,7 +8,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
+from compiler.service import CompileRequest, SkillCompiler, SkillCompilerError
 from local_memory.demo import main as _memory_demo_main
 from local_memory.embedder import EmbeddingUnavailableError
 from local_memory.store import MemoryStoreError
@@ -91,6 +93,27 @@ def _parser() -> argparse.ArgumentParser:
     distill.add_argument("--exit-code", type=int)
     distill.add_argument("--fixture", type=Path)
 
+    compile_command = commands.add_parser(
+        "compile", help="compile a recurring session workflow into a gated skill"
+    )
+    compile_command.add_argument("--from", dest="session", type=Path, required=True)
+    compile_command.add_argument("--workflow")
+    compile_command.add_argument("--name-hint")
+    compile_command.add_argument(
+        "--reason", default="Recurring workflow selected for reuse"
+    )
+    compile_command.add_argument("--actor", default="synth-cli")
+    compile_command.add_argument("--request-id")
+    compile_command.add_argument("--fixture", type=Path, help=argparse.SUPPRESS)
+
+    skill = commands.add_parser("skill", help="manage compiler-promoted skills")
+    skill_commands = skill.add_subparsers(dest="skill_command", required=True)
+    demote = skill_commands.add_parser(
+        "demote", help="move a compiler-managed skill into recoverable storage"
+    )
+    demote.add_argument("name")
+    demote.add_argument("--reason", default="User-requested demotion")
+
     telemetry = commands.add_parser("telemetry", help="read extension telemetry")
     telemetry_commands = telemetry.add_subparsers(
         dest="telemetry_command", required=True
@@ -133,9 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if command == "ping":
-            _write_json(
-                _service_request("ping", {"protocolVersion": PROTOCOL_VERSION})
-            )
+            _write_json(_service_request("ping", {"protocolVersion": PROTOCOL_VERSION}))
             return 0
         if command == "embed":
             texts = cast(list[str], args.text)
@@ -180,9 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             memory_command = cast(str, args.memory_command)
             if memory_command == "list":
                 _write_json(
-                    _service_request(
-                        "memory.list", {"limit": cast(int, args.limit)}
-                    )
+                    _service_request("memory.list", {"limit": cast(int, args.limit)})
                 )
                 return 0
             if memory_command == "search":
@@ -235,6 +254,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if command == "compile":
+            configured_request_id = cast(str | None, args.request_id)
+            compile_outcome = SkillCompiler().compile(
+                CompileRequest(
+                    session_path=cast(Path, args.session),
+                    request_id=configured_request_id or str(uuid4()),
+                    actor=cast(str, args.actor),
+                    reason=cast(str, args.reason),
+                    workflow=cast(str | None, args.workflow),
+                    name_hint=cast(str | None, args.name_hint),
+                    fixture_path=cast(Path | None, args.fixture),
+                )
+            )
+            _write_json(compile_outcome.as_dict())
+            return 0 if compile_outcome.status == "promoted" else 1
+        if command == "skill":
+            skill_command = cast(str, args.skill_command)
+            if skill_command != "demote":
+                raise ValueError(f"unknown skill command: {skill_command}")
+            demotion_outcome = SkillCompiler().demote(
+                Path.cwd(),
+                cast(str, args.name),
+                actor="synth-cli",
+                reason=cast(str, args.reason),
+            )
+            _write_json(demotion_outcome.as_dict())
+            return 0
         if command == "bridge":
             return run_bridge()
         raise ValueError(f"unknown command: {command}")
@@ -247,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ReasoningBankError,
         ServiceError,
         SessionParseError,
+        SkillCompilerError,
         SynthConfigError,
         TelemetryValidationError,
         ValueError,

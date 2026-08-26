@@ -98,7 +98,71 @@ WHEN_NOT_PATTERN = re.compile(
     r"\bwhen[\s-]+not\b|\bdo not use when\b|\bavoid when\b",
     re.IGNORECASE,
 )
+SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PYTEST_TIME_PATTERN = re.compile(r"\s+in\s+\d+(?:\.\d+)?s\b")
+DANGEROUS_EXECUTION_CALLS = frozenset(
+    {
+        "__import__",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell",
+        "compile",
+        "eval",
+        "exec",
+        "importlib.import_module",
+        "multiprocessing.Process",
+        "os.execl",
+        "os.execle",
+        "os.execlp",
+        "os.execlpe",
+        "os.execv",
+        "os.execve",
+        "os.execvp",
+        "os.execvpe",
+        "os.popen",
+        "os.spawnl",
+        "os.spawnle",
+        "os.spawnlp",
+        "os.spawnlpe",
+        "os.spawnv",
+        "os.spawnve",
+        "os.spawnvp",
+        "os.spawnvpe",
+        "os.system",
+        "pty.spawn",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.Popen",
+        "subprocess.run",
+    }
+)
+FORBIDDEN_INSTRUCTION_PATTERN = re.compile(
+    r"\bcompile_skill\b|\brefine_skill\b|\brefine\.run\b|"
+    r"\bsynth\s+compile\b|(?<!\w)/refine\b",
+    re.IGNORECASE,
+)
+DEFAULT_CONTROL_PLANE_PATHS = (
+    ".git",
+    ".prime/agent/extensions",
+    "compiler",
+    "local_memory",
+    "middleware",
+    "optimizer",
+    "packages",
+    "prime-agent-runtime",
+    "scripts",
+    "pyproject.toml",
+    "synth",
+    "synth.json",
+    "uv.lock",
+)
+DEFAULT_SELF_MODIFICATION_PATHS = (
+    ".prime/agent/skills",
+    ".synth/audit",
+    ".synth/demoted",
+    ".synth/locks",
+    ".synth/quarantine",
+)
 
 
 def _default_repository_root() -> Path:
@@ -115,7 +179,7 @@ def _default_temporary_roots() -> tuple[Path, ...]:
 
 
 def _default_uv_cache_dir() -> Path:
-    return Path(tempfile.gettempdir()) / "synth-skill-gate-uv-cache"
+    return _default_repository_root() / ".synth" / "skill-gate-uv-cache"
 
 
 @dataclass(frozen=True)
@@ -127,10 +191,14 @@ class GatePolicy:
     max_file_bytes: int = 64 * 1024
     max_package_bytes: int = 512 * 1024
     uv_binary: str = "uv"
+    python_version: str = "3.11"
     ruff_version: str = "0.16.4"
     pytest_version: str = "9.1.1"
     tool_timeout_seconds: int = 120
     uv_cache_dir: Path = field(default_factory=_default_uv_cache_dir)
+    offline: bool = True
+    protected_roots: tuple[Path, ...] = ()
+    self_modification_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if self.max_file_bytes <= 0:
@@ -150,6 +218,20 @@ class GatePolicy:
         if self.bundled_skills_dir is not None:
             return self.bundled_skills_dir.resolve()
         return (self.repository_root / "packages" / "coding-agent" / "skills").resolve()
+
+    @property
+    def effective_protected_roots(self) -> tuple[Path, ...]:
+        roots = self.protected_roots or tuple(
+            self.repository_root / path for path in DEFAULT_CONTROL_PLANE_PATHS
+        )
+        return tuple(path.resolve() for path in roots)
+
+    @property
+    def effective_self_modification_roots(self) -> tuple[Path, ...]:
+        roots = self.self_modification_roots or tuple(
+            self.repository_root / path for path in DEFAULT_SELF_MODIFICATION_PATHS
+        )
+        return tuple(path.resolve() for path in roots)
 
 
 @dataclass(frozen=True)
@@ -418,10 +500,17 @@ def _package_shape_check(candidate_dir: Path) -> tuple[CheckResult, _ShapeContex
         )
     else:
         evidence.append(f"frontmatter name {name!r} matches directory")
+        if len(name_value) > 64 or SKILL_NAME_PATTERN.fullmatch(name_value) is None:
+            failures.append(
+                "frontmatter name must be at most 64 characters of lowercase "
+                "letters, digits, and single hyphens"
+            )
 
     description = frontmatter.get("description")
     if not isinstance(description, str) or not description.strip():
         failures.append("frontmatter description must be a nonempty string")
+    elif len(description) > 1024:
+        failures.append("frontmatter description must be at most 1024 characters")
     elif (
         "when" not in description.lower()
         or WHEN_NOT_PATTERN.search(description) is None
@@ -509,7 +598,30 @@ def _package_shape_check(candidate_dir: Path) -> tuple[CheckResult, _ShapeContex
     if not expected_test.is_file():
         failures.append(f"tests/test_{import_name}.py is missing")
     else:
-        evidence.append(f"tests/test_{import_name}.py exists")
+        try:
+            test_tree = ast.parse(
+                expected_test.read_text(encoding="utf-8"),
+                filename=expected_test.name,
+            )
+            test_cases = sum(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                for node in test_tree.body
+            )
+        except (OSError, SyntaxError, UnicodeError) as error:
+            failures.append(
+                f"tests/test_{import_name}.py cannot be parsed: "
+                f"{error.__class__.__name__}"
+            )
+        else:
+            if test_cases < 2:
+                failures.append(
+                    f"tests/test_{import_name}.py must define at least two test cases"
+                )
+            else:
+                evidence.append(
+                    f"tests/test_{import_name}.py defines {test_cases} test cases"
+                )
 
     status: CheckStatus = "fail" if failures else "pass"
     return (
@@ -584,6 +696,9 @@ class _SafetyVisitor(ast.NodeVisitor):
         self.allowed_roots = policy.effective_workspace_roots + tuple(
             path.resolve() for path in policy.temporary_roots
         )
+        self.runtime_cwd = policy.repository_root.resolve()
+        self.protected_roots = policy.effective_protected_roots
+        self.self_modification_roots = policy.effective_self_modification_roots
         self.allow_all_network = allow_all_network
         self.declared_network = declared_network
         self.findings: list[_Finding] = []
@@ -625,7 +740,7 @@ class _SafetyVisitor(ast.NodeVisitor):
         resolved = (
             path.resolve()
             if path.is_absolute()
-            else (self.candidate_dir / path).resolve()
+            else (self.runtime_cwd / path).resolve()
         )
         if _within(resolved, self.allowed_roots):
             return _PathAssessment(True, raw, resolved)
@@ -657,7 +772,7 @@ class _SafetyVisitor(ast.NodeVisitor):
             if qualified in {"Path", "pathlib.Path"} and node.args:
                 return self._assess_path(node.args[0])
             if qualified in {"Path.cwd", "pathlib.Path.cwd"}:
-                return _PathAssessment(True, "workspace cwd", self.candidate_dir)
+                return _PathAssessment(True, "workspace cwd", self.runtime_cwd)
             if qualified in {"tempfile.gettempdir", "tempfile.mkdtemp"}:
                 temporary_root = Path(tempfile.gettempdir()).resolve()
                 return _PathAssessment(True, "temporary directory", temporary_root)
@@ -712,6 +827,24 @@ class _SafetyVisitor(ast.NodeVisitor):
                 node,
                 f"{operation} target is outside workspace/tmp roots or unresolved: "
                 f"{assessment.detail}",
+            )
+        elif assessment.resolved is not None and _within(
+            assessment.resolved, self.self_modification_roots
+        ):
+            self._add(
+                "self_modification",
+                node,
+                f"{operation} targets protected skill compiler state: "
+                f"{assessment.resolved.as_posix()}",
+            )
+        elif assessment.resolved is not None and _within(
+            assessment.resolved, self.protected_roots
+        ):
+            self._add(
+                "control_plane",
+                node,
+                f"{operation} targets protected Synth control plane: "
+                f"{assessment.resolved.as_posix()}",
             )
 
     @staticmethod
@@ -811,6 +944,13 @@ class _SafetyVisitor(ast.NodeVisitor):
             module = self._literal_string(node.args[0])
             if module is not None:
                 self._check_network_module(node, module)
+
+        if qualified in DANGEROUS_EXECUTION_CALLS:
+            self._add(
+                "process_execution",
+                node,
+                f"invocation of {qualified!r} is forbidden in generated skills",
+            )
 
         if leaf in SELF_MODIFY_NAMES or (
             "skill" in leaf and ("refin" in leaf or "compil" in leaf)
@@ -948,6 +1088,28 @@ def _static_safety_check(
     if declaration_error is not None:
         findings.append(_Finding("SKILL.md", 0, "network", declaration_error))
 
+    for instruction_path in (
+        candidate_dir / "SKILL.md",
+        candidate_dir / "pyproject.toml",
+    ):
+        if not instruction_path.is_file():
+            continue
+        try:
+            instruction_text = instruction_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        match = FORBIDDEN_INSTRUCTION_PATTERN.search(instruction_text)
+        if match is not None:
+            findings.append(
+                _Finding(
+                    instruction_path.name,
+                    instruction_text.count("\n", 0, match.start()) + 1,
+                    "self_modification",
+                    f"instruction invokes forbidden compiler/refinement surface "
+                    f"{match.group(0)!r}",
+                )
+            )
+
     python_files = tuple(
         path for path in entries if not path.is_symlink() and path.suffix == ".py"
     )
@@ -995,6 +1157,9 @@ def _static_safety_check(
             f"{policy.max_file_bytes}/{policy.max_package_bytes} bytes",
             f"network declarations: {network_evidence}; imports are compliant",
             "filesystem mutations are confined to workspace/tmp paths",
+            "writes to live skill and compiler lifecycle state are forbidden",
+            "writes to Synth control-plane roots are forbidden",
+            "dynamic code and process execution are forbidden",
             "no skill compilation or refinement invocation found",
             f"name is clear of {len(bundled_names)} bundled skills",
         )
@@ -1013,6 +1178,8 @@ def _tool_environment(policy: GatePolicy) -> dict[str, str]:
             "UV_NO_PROGRESS": "1",
         }
     )
+    if policy.offline:
+        environment["UV_OFFLINE"] = "1"
     return environment
 
 
@@ -1035,7 +1202,7 @@ def _run_uv_tool(
         "--no-config",
         "--isolated",
         "--python",
-        "3.12",
+        policy.python_version,
         "--managed-python",
         *arguments,
     ]
@@ -1217,6 +1384,12 @@ def evaluate(candidate_dir: str | Path, policy: GatePolicy | None = None) -> Gat
         content_hash=content_hash,
         checks=checks,
     )
+
+
+def content_hash(candidate_dir: str | Path) -> str:
+    """Return the same deterministic tree hash recorded by evaluate()."""
+
+    return _tree_hash(Path(candidate_dir).resolve())
 
 
 def verdict_table(results: Sequence[GateResult]) -> str:

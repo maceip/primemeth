@@ -40,7 +40,15 @@ class MemoryDeduplicator:
 
     def add(self, memory: NewMemory) -> DedupResult:
         candidate_vector = self.store.embed_memory(memory)
-        nearest = self.store.search_vector(candidate_vector, top_k=1)
+        stored_items = self.store.list()
+        nearest = [
+            match
+            for match in self.store.search_vector(
+                candidate_vector,
+                top_k=max(1, len(stored_items)),
+            )
+            if match.item.item_type == memory.item_type
+        ][:1]
         if not nearest or nearest[0].similarity <= self.threshold:
             inserted = self.store.insert(memory, embedding=candidate_vector)
             return DedupResult(action="inserted", item=inserted)
