@@ -1031,6 +1031,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		if (
 			runtime.distillEnqueued ||
+			process.env.SYNTH_BATCH_READ_ONLY_MEMORY === "1" ||
 			reason === "reload" ||
 			!config?.memory.enabled ||
 			config.killSwitch.all ||

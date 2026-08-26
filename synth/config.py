@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 
 class SynthConfigError(ValueError):
     """Raised when synth.json cannot be used safely by the Python control plane."""
+
+
+EndpointApi = Literal["openai-completions", "openai-responses"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,7 @@ class EndpointSettings:
     model: str
     small_model: str
     api_key_env: str
+    api: EndpointApi
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +76,8 @@ _TOP_LEVEL_KEYS = {
     "skillCompiler",
     "killSwitch",
 }
-_ENDPOINT_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
+_ENDPOINT_REQUIRED_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
+_ENDPOINT_OPTIONAL_KEYS = {"api"}
 _TELEMETRY_KEYS = {"dir"}
 _MEMORY_KEYS = {"enabled", "k", "minScore", "db", "embedModel", "judgeModel"}
 _VERIFIER_KEYS = {"interactive", "batch", "maxCycles", "contGen"}
@@ -145,12 +150,25 @@ def resolve_data_plane_path(workspace: Path, configured_path: str) -> Path:
 
 def _endpoint(value: object) -> EndpointSettings:
     mapping = _object(value, "endpoint")
-    _exact_keys(mapping, _ENDPOINT_KEYS, "endpoint")
+    missing = _ENDPOINT_REQUIRED_KEYS - set(mapping)
+    extra = set(mapping) - _ENDPOINT_REQUIRED_KEYS - _ENDPOINT_OPTIONAL_KEYS
+    if missing:
+        raise SynthConfigError(f"endpoint is missing: {', '.join(sorted(missing))}")
+    if extra:
+        raise SynthConfigError(
+            f"endpoint has unexpected fields: {', '.join(sorted(extra))}"
+        )
+    api = _string(mapping.get("api", "openai-completions"), "endpoint.api")
+    if api not in ("openai-completions", "openai-responses"):
+        raise SynthConfigError(
+            "endpoint.api must be openai-completions or openai-responses"
+        )
     return EndpointSettings(
         base_url=_string(mapping["baseUrl"], "endpoint.baseUrl"),
         model=_string(mapping["model"], "endpoint.model"),
         small_model=_string(mapping["smallModel"], "endpoint.smallModel"),
         api_key_env=_string(mapping["apiKeyEnv"], "endpoint.apiKeyEnv"),
+        api=cast(EndpointApi, api),
     )
 
 
@@ -205,9 +223,7 @@ def _verifier(value: object | None) -> VerifierSettings:
     mapping = _object(value, "verifier")
     _exact_keys(mapping, _VERIFIER_KEYS, "verifier")
     continuation = _object(mapping["contGen"], "verifier.contGen")
-    _exact_keys(
-        continuation, _CONTINUE_GENERATION_KEYS, "verifier.contGen"
-    )
+    _exact_keys(continuation, _CONTINUE_GENERATION_KEYS, "verifier.contGen")
     return VerifierSettings(
         interactive=_boolean(mapping["interactive"], "verifier.interactive"),
         batch=_boolean(mapping["batch"], "verifier.batch"),
@@ -233,9 +249,7 @@ def _skill_compiler(
         return SkillCompilerSettings(
             enabled=enabled_default,
             max_per_session=2,
-            quarantine_path=resolve_data_plane_path(
-                workspace, ".synth/quarantine"
-            ),
+            quarantine_path=resolve_data_plane_path(workspace, ".synth/quarantine"),
         )
     mapping = _object(value, "skillCompiler")
     _exact_keys(mapping, _SKILL_COMPILER_KEYS, "skillCompiler")

@@ -3,21 +3,31 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
+const EndpointApiSchema = Type.Union(
+	[Type.Literal("openai-completions"), Type.Literal("openai-responses")],
+	{
+		description:
+			"OpenAI-compatible protocol used by Synth control-plane model calls; defaults to Chat Completions.",
+		default: "openai-completions",
+	},
+);
+
 const EndpointSchema = Type.Object(
 	{
 		baseUrl: Type.String({
 			minLength: 1,
-			description: "Local OpenAI-compatible endpoint base URL.",
+			description: "Configured OpenAI-compatible endpoint base URL.",
 		}),
-		model: Type.String({ minLength: 1, description: "Primary local model identifier." }),
+		model: Type.String({ minLength: 1, description: "Primary endpoint model identifier." }),
 		smallModel: Type.String({
 			minLength: 1,
-			description: "Local model used for judging, verification, and summaries.",
+			description: "Endpoint model used for judging, verification, and summaries.",
 		}),
 		apiKeyEnv: Type.String({
 			minLength: 1,
-			description: "Environment variable containing the local endpoint API key.",
+			description: "Environment variable containing the endpoint API key.",
 		}),
+		api: Type.Optional(EndpointApiSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -141,9 +151,18 @@ export const SynthConfigSchema = Type.Object(
 );
 
 export type SynthConfigFile = Static<typeof SynthConfigSchema>;
+export type SynthEndpointApi = Static<typeof EndpointApiSchema>;
+
+export interface SynthEndpointConfig {
+	baseUrl: string;
+	model: string;
+	smallModel: string;
+	apiKeyEnv: string;
+	api: SynthEndpointApi;
+}
 
 export interface SynthConfig {
-	endpoint?: Static<typeof EndpointSchema>;
+	endpoint?: SynthEndpointConfig;
 	telemetry: Static<typeof TelemetryConfigSchema>;
 	budgets: SynthBudgetConfig;
 	memory: Static<typeof MemorySchema>;
@@ -207,7 +226,9 @@ export function resolveDataPlanePath(cwd: string, configuredPath: string): strin
 
 function normalizeConfig(cwd: string, value: SynthConfigFile): SynthConfig {
 	const config: SynthConfig = {
-		...(value.endpoint ? { endpoint: value.endpoint } : {}),
+		...(value.endpoint
+			? { endpoint: { ...value.endpoint, api: value.endpoint.api ?? "openai-completions" } }
+			: {}),
 		telemetry: value.telemetry ?? SYNTH_CONFIG_DEFAULTS.telemetry,
 		budgets: { ...SYNTH_CONFIG_DEFAULTS.budgets, ...value.budgets },
 		memory: value.memory ?? SYNTH_CONFIG_DEFAULTS.memory,

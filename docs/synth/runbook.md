@@ -14,6 +14,65 @@ The setup step installs a uv-managed Python 3.12 overlay environment, prepares t
 
 The default endpoint is `http://localhost:8000/v1`, with model IDs `local-main` and `local-small`. Start an OpenAI-compatible Ollama, vLLM, LM Studio, or equivalent server there, or change both `synth.json` and the local model catalog to match your endpoint. The faux-provider acceptance path needs no inference server or API key.
 
+### Optional paid live OpenAI endpoint
+
+This is an explicit operator opt-in remote exception, not the runtime default. Keep the checked-in localhost profile unchanged. For a live evaluation, configure a user-owned provider in `~/.prime/agent/models.json` and use an uncommitted `synth.json` override in the evaluation checkout. Never put an API key value in either file; both configurations name an environment variable.
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "apiKey": "OPENAI_API_KEY",
+      "models": [{
+        "id": "gpt-5.4-mini",
+        "name": "GPT-5.4 Mini",
+        "reasoning": true,
+        "contextWindow": 400000,
+        "maxTokens": 128000,
+        "cost": { "input": 0.75, "output": 4.5, "cacheRead": 0.075, "cacheWrite": 0 }
+      }]
+    }
+  }
+}
+```
+
+The cost fields are USD per million tokens and match the [official GPT-5.4 mini model page](https://developers.openai.com/api/docs/models/gpt-5.4-mini). The Responses API is the supported path for tool-calling with reasoning. Point Synth's judge, verifier, and distiller at the same protocol in the evaluation checkout. Enable memory explicitly when the run will distill:
+
+```json
+{
+  "endpoint": {
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
+    "smallModel": "gpt-5.4-mini",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "api": "openai-responses"
+  },
+  "memory": {
+    "enabled": true,
+    "k": 3,
+    "minScore": 0.35,
+    "db": ".synth/synth.db",
+    "embedModel": "BAAI/bge-small-en-v1.5",
+    "judgeModel": "small"
+  }
+}
+```
+
+Then run a persisted print session with an explicit model and a bounded reasoning level:
+
+```bash
+DO_NOT_TRACK=1 PRIME_AGENT_TELEMETRY=0 ./prime-agent.sh --dist --offline \
+  --cwd /path/to/evaluation-checkout \
+  --session-dir /path/to/evaluation-checkout/.synth/live-sessions \
+  --model openai/gpt-5.4-mini --thinking off \
+  --tools ipython --no-skills --no-context-files \
+  --print "Call ipython exactly once to print 6 * 7, then reply with only 42."
+```
+
+The native session JSONL records token and cost usage. `synth judge` and `synth distill` use `endpoint.api`; omitting the field preserves the local Chat Completions default.
+
 ## 2. Inspect configuration
 
 The checked-in `synth.json` is the local development profile. The complete generated reference is [config.md](config.md). Validate documentation drift after changing the schema:
@@ -103,7 +162,24 @@ uv run --project . --no-sync synth run \
   --max-trajectories 2
 ```
 
-Batch artifacts live under `.synth/batch-runs/<run-id>/`, including per-trajectory candidates, verifier JSON, patch artifacts, and `selection.json`. A `PIVOT` or `CONTINUE` remains in the current trajectory up to `verifier.maxCycles`; verified success with sufficient remaining budget can start a fresh worktree trajectory.
+Batch artifacts live under `.synth/runs/<run-id>/`, including per-trajectory candidates, verifier JSON, patch artifacts, and `selection.json`. A `PIVOT` or `CONTINUE` remains in the current trajectory up to `verifier.maxCycles`; verified success with sufficient remaining budget can start a fresh worktree trajectory.
+
+For a paired, acceptance-scored ReasoningBank pilot, snapshot a previously distilled bank and run the same fixture cases with memory off and on:
+
+```bash
+uv run --project . --no-sync synth evaluate \
+  --bank /path/to/seeded/synth.db \
+  --tasks tests/harness_tasks/dev \
+  --case dev-normalize --case dev-mean \
+  --repetitions 2 \
+  --model openai/gpt-5.4-mini --thinking off \
+  --endpoint-base-url https://api.openai.com/v1 \
+  --endpoint-api openai-responses \
+  --endpoint-model gpt-5.4-mini \
+  --endpoint-api-key-env OPENAI_API_KEY
+```
+
+The evaluator creates fresh committed fixture repositories without `task.yaml`, alternates condition order, copies one immutable SQLite backup into each memory-on worktree, disables automatic evaluation distillation, and scores the focused pytest exit status. Reports live under `.synth/effectiveness/<run-id>/`. Their token and USD figures cover native main-agent assistant usage only; the deterministic verifier adds no provider call, and the separate bank-building judge/distill calls are not included.
 
 ## 7. Run AutoSaddler
 

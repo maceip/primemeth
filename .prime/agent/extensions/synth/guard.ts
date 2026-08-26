@@ -56,10 +56,33 @@ function protectedPath(path: string, cwd: string): boolean {
 	return false;
 }
 
+function containsRelativePath(text: string, path: string): boolean {
+	const beforeBoundary = " \t\r\n\"'`([{=,:;";
+	const afterBoundary = `${beforeBoundary})]}`;
+	for (const candidate of [path, `./${path}`]) {
+		let offset = 0;
+		while (offset < text.length) {
+			const index = text.indexOf(candidate, offset);
+			if (index < 0) break;
+			const before = index === 0 ? undefined : text[index - 1];
+			const afterIndex = index + candidate.length;
+			const after = afterIndex === text.length ? undefined : text[afterIndex];
+			if (
+				(before === undefined || beforeBoundary.includes(before)) &&
+				(after === undefined || after === "/" || afterBoundary.includes(after))
+			) {
+				return true;
+			}
+			offset = index + candidate.length;
+		}
+	}
+	return false;
+}
+
 function mentionsProtectedPath(text: string, cwd: string): boolean {
 	const normalized = text.replaceAll("\\", "/");
 	for (const root of PROTECTED_CONTROL_ROOTS) {
-		if (normalized.includes(root)) {
+		if (containsRelativePath(normalized, root)) {
 			return true;
 		}
 		const absolute = resolve(cwd, root).replaceAll("\\", "/");
@@ -68,7 +91,10 @@ function mentionsProtectedPath(text: string, cwd: string): boolean {
 		}
 	}
 	for (const file of PROTECTED_CONTROL_FILES) {
-		if (normalized.includes(file) || normalized.includes(resolve(cwd, file).replaceAll("\\", "/"))) {
+		if (
+			containsRelativePath(normalized, file) ||
+			normalized.includes(resolve(cwd, file).replaceAll("\\", "/"))
+		) {
 			return true;
 		}
 	}

@@ -6,10 +6,11 @@ Synth reads one project-level `synth.json`. If the file is absent, the extension
 
 | Setting | Type | Required | Effective default | Constraints | Description |
 | --- | --- | --- | --- | --- | --- |
-| `endpoint.baseUrl` | string | when endpoint is present | none | min length 1 | Local OpenAI-compatible endpoint base URL. |
-| `endpoint.model` | string | when endpoint is present | none | min length 1 | Primary local model identifier. |
-| `endpoint.smallModel` | string | when endpoint is present | none | min length 1 | Local model used for judging, verification, and summaries. |
-| `endpoint.apiKeyEnv` | string | when endpoint is present | none | min length 1 | Environment variable containing the local endpoint API key. |
+| `endpoint.baseUrl` | string | when endpoint is present | none | min length 1 | Configured OpenAI-compatible endpoint base URL. |
+| `endpoint.model` | string | when endpoint is present | none | min length 1 | Primary endpoint model identifier. |
+| `endpoint.smallModel` | string | when endpoint is present | none | min length 1 | Endpoint model used for judging, verification, and summaries. |
+| `endpoint.apiKeyEnv` | string | when endpoint is present | none | min length 1 | Environment variable containing the endpoint API key. |
+| `endpoint.api` | openai-completions \| openai-responses | no | `"openai-completions"` | none | OpenAI-compatible protocol used by Synth control-plane model calls; defaults to Chat Completions. |
 | `telemetry.dir` | string | when telemetry is present | `".synth/telemetry"` | min length 1 | Append-only Synth telemetry directory inside .synth. |
 | `budgets.bash` | integer | when budgets is present | `0` | min 0 | Per-session bash tool-call ceiling; zero is unlimited. |
 | `budgets.edit` | integer | when budgets is present | `0` | min 0 | Per-session edit tool-call ceiling; zero is unlimited. |

@@ -27,7 +27,12 @@ from synth.batch import (
 )
 from synth.bridge import run_bridge
 from synth.capabilities import CAPABILITIES
-from synth.config import SynthConfigError, load_synth_settings
+from synth.config import EndpointApi, SynthConfigError, load_synth_settings
+from synth.effectiveness import (
+    EffectivenessError,
+    EndpointSpec,
+    run_effectiveness_evaluation,
+)
 from synth.model import ModelCallError, fixture_path_from_environment
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
@@ -69,6 +74,26 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-seconds", type=float, default=900.0)
     run.add_argument("--fixture-cli", type=Path, help=argparse.SUPPRESS)
     run.add_argument("--judge-fixture", type=Path, help=argparse.SUPPRESS)
+
+    evaluate = commands.add_parser(
+        "evaluate", help="compare ReasoningBank memory on versus off"
+    )
+    evaluate.add_argument("--tasks", type=Path, default=Path("tests/harness_tasks/dev"))
+    evaluate.add_argument("--case", action="append", default=[])
+    evaluate.add_argument("--bank", type=Path, required=True)
+    evaluate.add_argument("--model", default="local/local-main")
+    evaluate.add_argument("--thinking", default="off")
+    evaluate.add_argument("--repetitions", type=int, default=1)
+    evaluate.add_argument("--run-id")
+    evaluate.add_argument("--timeout-seconds", type=float, default=900.0)
+    evaluate.add_argument("--endpoint-base-url", default="http://localhost:8000/v1")
+    evaluate.add_argument(
+        "--endpoint-api",
+        choices=("openai-completions", "openai-responses"),
+        default="openai-completions",
+    )
+    evaluate.add_argument("--endpoint-model", default="local-small")
+    evaluate.add_argument("--endpoint-api-key-env", default="SYNTH_LOCAL_API_KEY")
 
     memory = commands.add_parser("memory", help="inspect ReasoningBank memory")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
@@ -189,6 +214,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if command == "evaluate":
+            selected_cases = tuple(cast(list[str], args.case))
+            endpoint_api = cast(str, args.endpoint_api)
+            if endpoint_api not in ("openai-completions", "openai-responses"):
+                raise ValueError(f"unknown endpoint API: {endpoint_api}")
+            evaluation = run_effectiveness_evaluation(
+                source_root=Path.cwd(),
+                tasks_root=cast(Path, args.tasks),
+                bank_path=cast(Path, args.bank),
+                model=cast(str, args.model),
+                thinking=cast(str, args.thinking),
+                endpoint=EndpointSpec(
+                    base_url=cast(str, args.endpoint_base_url),
+                    api=cast(EndpointApi, endpoint_api),
+                    model=cast(str, args.endpoint_model),
+                    api_key_env=cast(str, args.endpoint_api_key_env),
+                ),
+                repetitions=cast(int, args.repetitions),
+                selected_cases=selected_cases,
+                run_id=cast(str | None, args.run_id),
+                timeout_seconds=cast(float, args.timeout_seconds),
+            )
+            _write_json(evaluation)
+            return 0 if evaluation.get("complete") is True else 1
         if command == "telemetry":
             telemetry_command = cast(str, args.telemetry_command)
             if telemetry_command != "validate":
@@ -287,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         EmbeddingUnavailableError,
         BatchWiringError,
+        EffectivenessError,
         MemoryStoreError,
         ModelCallError,
         OSError,

@@ -21,12 +21,28 @@ def main() -> int:
     initial_value: object = json.loads(initial_raw)
     initial = initial_value if isinstance(initial_value, dict) else {}
 
+    expected_seed = os.environ.get("SYNTH_FAKE_MEMORY_SEED")
+    if expected_seed is not None:
+        actual_seed = args.cwd.joinpath(".synth", "synth.db").read_text()
+        if actual_seed != expected_seed:
+            raise RuntimeError("batch memory seed was not copied into the worktree")
+    if os.environ.get("SYNTH_FAKE_WRITE_TELEMETRY") == "1":
+        telemetry = args.cwd / ".synth" / "telemetry" / "fake.jsonl"
+        telemetry.parent.mkdir(parents=True, exist_ok=True)
+        telemetry.write_text('{"kind":"fixture"}\n')
+    mutation_value = os.environ.get("SYNTH_FAKE_MUTATE_PATH")
+    if mutation_value is not None:
+        mutation_path = Path(mutation_value)
+        if mutation_path.is_absolute() or ".." in mutation_path.parts:
+            raise ValueError("SYNTH_FAKE_MUTATE_PATH must be a safe relative path")
+        args.cwd.joinpath(mutation_path).write_text(
+            os.environ.get("SYNTH_FAKE_MUTATE_CONTENT", "mutated by fake agent\n")
+        )
+
     def used(name: str, increment: float) -> float:
         value = initial.get(name, 0)
         return (
-            float(value) + increment
-            if isinstance(value, (int, float))
-            else increment
+            float(value) + increment if isinstance(value, (int, float)) else increment
         )
 
     bash_used = used("bash", 1)

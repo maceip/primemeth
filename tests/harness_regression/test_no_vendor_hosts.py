@@ -19,11 +19,13 @@ PACKAGE_SOURCE_ROOTS = tuple(
 )
 RUNTIME_ROOTS = (
     ROOT / ".prime" / "agent",
+    ROOT / "compiler",
     ROOT / "local_memory",
     ROOT / "middleware",
     ROOT / "optimizer",
     ROOT / "packages" / "coding-agent" / "skills",
     ROOT / "prime-agent-runtime" / "src",
+    ROOT / "synth",
 ) + PACKAGE_SOURCE_ROOTS
 RUNTIME_SUFFIXES = {
     ".css",

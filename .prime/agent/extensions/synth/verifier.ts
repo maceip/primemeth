@@ -364,7 +364,7 @@ function loadFixture(path: string): VerifierFixture {
 	};
 }
 
-function completionUrl(baseUrl: string): string {
+function modelUrl(baseUrl: string, api: NonNullable<SynthConfig["endpoint"]>["api"]): string {
 	const url = new URL(baseUrl);
 	if (
 		(url.protocol !== "http:" && url.protocol !== "https:") ||
@@ -375,11 +375,44 @@ function completionUrl(baseUrl: string): string {
 	) {
 		throw new Error("endpoint.baseUrl must be an HTTP(S) URL without credentials, query, or fragment");
 	}
-	return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+	const suffix = api === "openai-responses" ? "responses" : "chat/completions";
+	return `${baseUrl.replace(/\/$/, "")}/${suffix}`;
 }
 
-function responseContent(value: unknown): string {
-	if (!isRecord(value) || !Array.isArray(value.choices) || value.choices.length === 0) {
+function responseContent(
+	value: unknown,
+	api: NonNullable<SynthConfig["endpoint"]>["api"],
+): string {
+	if (!isRecord(value)) {
+		throw new Error("verifier endpoint response must be an object");
+	}
+	if (api === "openai-responses") {
+		if (value.status !== undefined && value.status !== "completed") {
+			const error = isRecord(value.error) && typeof value.error.message === "string"
+				? value.error.message
+				: isRecord(value.incomplete_details) && typeof value.incomplete_details.reason === "string"
+					? value.incomplete_details.reason
+					: String(value.status);
+			throw new Error(`verifier endpoint response did not complete: ${error}`);
+		}
+		const text = (Array.isArray(value.output) ? value.output : [])
+			.flatMap((item) => {
+				if (!isRecord(item) || item.type !== "message" || !Array.isArray(item.content)) return [];
+				return item.content.flatMap((part) =>
+					isRecord(part) && part.type === "output_text" && typeof part.text === "string"
+						? [part.text]
+						: [],
+				);
+			})
+			.join("")
+			.trim();
+		if (text) return text;
+		if (typeof value.output_text === "string" && value.output_text.trim()) {
+			return value.output_text.trim();
+		}
+		throw new Error("verifier endpoint returned empty output text");
+	}
+	if (!Array.isArray(value.choices) || value.choices.length === 0) {
 		throw new Error("verifier endpoint response has no choices");
 	}
 	const first = value.choices[0];
@@ -424,15 +457,24 @@ export class VerifierClient {
 		const signal = AbortSignal.timeout(MODEL_TIMEOUT_MS);
 		let response: Response;
 		try {
-			response = await fetch(completionUrl(endpoint.baseUrl), {
+			response = await fetch(modelUrl(endpoint.baseUrl, endpoint.api), {
 				method: "POST",
 				headers,
-				body: JSON.stringify({
-					model: endpoint.smallModel,
-					messages: [{ role: "user", content: prompt }],
-					temperature: 0,
-					stream: false,
-				}),
+				body: JSON.stringify(
+					endpoint.api === "openai-responses"
+						? {
+								model: endpoint.smallModel,
+								input: prompt,
+								stream: false,
+								store: false,
+							}
+						: {
+								model: endpoint.smallModel,
+								messages: [{ role: "user", content: prompt }],
+								temperature: 0,
+								stream: false,
+							},
+				),
 				signal,
 			});
 		} catch (error) {
@@ -445,6 +487,6 @@ export class VerifierClient {
 		} catch (error) {
 			throw new Error(`strategic verifier endpoint returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		return responseContent(value);
+		return responseContent(value, endpoint.api);
 	}
 }

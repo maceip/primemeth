@@ -27,6 +27,7 @@ import {
 	createAgentSession,
 	type AgentSession,
 	type ExtensionCommandContextActions,
+	type ToolCallEvent,
 	type ToolDefinition,
 	SessionManager,
 } from "../packages/coding-agent/src/index.js";
@@ -37,6 +38,7 @@ import {
 	PROBLEM_FRAMING_HEADING,
 	renderProblemFraming,
 } from "../.prime/agent/extensions/synth/memory.js";
+import { controlPlaneBlockReason } from "../.prime/agent/extensions/synth/guard.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const demoDir = mkdtempSync(join(tmpdir(), "synth-phase7-demo-"));
@@ -342,6 +344,25 @@ let secondSession: DemoSession | undefined;
 let completed = false;
 
 try {
+	const taskWorkspace = join(repositoryRoot, ".synth", "guard-fixture");
+	const taskWrite: ToolCallEvent = {
+		type: "tool_call",
+		toolCallId: "task-write",
+		toolName: "ipython",
+		input: {
+			code: `from pathlib import Path\nPath(${JSON.stringify(join(taskWorkspace, "slug.py"))}).write_text("fixed")`,
+		},
+	};
+	assert.equal(controlPlaneBlockReason(taskWrite, taskWorkspace), undefined);
+	const protectedWrite: ToolCallEvent = {
+		...taskWrite,
+		toolCallId: "protected-write",
+		input: {
+			code: `from pathlib import Path\nPath(${JSON.stringify(join(taskWorkspace, "synth", "model.py"))}).write_text("unsafe")`,
+		},
+	};
+	assert.match(controlPlaneBlockReason(protectedWrite, taskWorkspace) ?? "", /control plane/);
+
 	firstSession = await createDemoSession(
 		"compiler-source",
 		[

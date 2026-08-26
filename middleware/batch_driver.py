@@ -5,9 +5,11 @@ wired into the synth CLI at Phase 5 integration (orphan-check exemption)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -26,6 +28,7 @@ BATS_FRESH_QUERY_THRESHOLD = 5
 BATS_FRESH_FILE_THRESHOLD = 3
 
 _RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _BUDGET_BLOCK_PATTERN = re.compile(r"<budget>(.*?)</budget>", re.DOTALL)
 _NUMBER_PATTERN = r"(?:\d+(?:\.\d+)?|\.\d+)"
 _BUDGET_FIELDS = (
@@ -120,6 +123,12 @@ class BatchDriverConfig:
     continue_generation: bool = True
     min_budget_fraction: float = 0.2
     private_daemon_cli: Path | None = None
+    acceptance_argv: tuple[str, ...] = ()
+    acceptance_timeout_seconds: float = 120.0
+    acceptance_inputs: Mapping[Path, str] = field(default_factory=dict)
+    immutable_worktree_paths: Mapping[str, str] = field(default_factory=dict)
+    memory_db_seed: Path | None = None
+    telemetry_relative_dir: Path = Path(".synth/telemetry")
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,12 @@ class TrajectoryResult:
     budget: BudgetState | None
     diff: str
     timed_out: bool
+    acceptance_exit_code: int | None
+    acceptance_stdout: str
+    acceptance_stderr: str
+    acceptance_timed_out: bool
+    acceptance_integrity_failures: tuple[str, ...]
+    telemetry_files: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -257,7 +272,7 @@ def run_batch(
     trajectories_dir.mkdir()
     candidates_dir.mkdir()
 
-    worktree_parent = Path(tempfile.mkdtemp(prefix=f"synth-batch-{config.run_id}-"))
+    worktree_parent = Path(tempfile.mkdtemp(prefix="synth-batch-"))
     candidates_recorded = 0
     trajectories_run = 0
     stop_reason = "trajectory_limit"
@@ -284,6 +299,18 @@ def run_batch(
                 if result.exit_code != 0:
                     action = "stop_cli_failure"
                     stop_reason = "cli_timeout" if result.timed_out else "cli_failure"
+                elif result.acceptance_timed_out:
+                    action = "stop_acceptance_timeout"
+                    stop_reason = "acceptance_timeout"
+                elif result.acceptance_integrity_failures:
+                    action = "stop_acceptance_integrity_failure"
+                    stop_reason = "acceptance_integrity_failure"
+                elif (
+                    result.acceptance_exit_code is not None
+                    and result.acceptance_exit_code != 0
+                ):
+                    action = "stop_acceptance_failure"
+                    stop_reason = "acceptance_failure"
                 elif result.session_jsonl is None:
                     action = "stop_missing_session"
                     stop_reason = "missing_session"
@@ -373,6 +400,12 @@ def _validate_inputs(task: BatchTaskSpec, config: BatchDriverConfig) -> Path:
         raise ValueError("cli_argv must not be empty")
     if config.timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if config.acceptance_timeout_seconds <= 0:
+        raise ValueError("acceptance_timeout_seconds must be positive")
+    if (config.acceptance_inputs or config.immutable_worktree_paths) and not (
+        config.acceptance_argv
+    ):
+        raise ValueError("acceptance integrity inputs require acceptance_argv")
     if not 0.0 <= config.min_budget_fraction <= 1.0:
         raise ValueError("min_budget_fraction must be between zero and one")
     if _RUN_ID_PATTERN.fullmatch(config.run_id) is None:
@@ -384,6 +417,31 @@ def _validate_inputs(task: BatchTaskSpec, config: BatchDriverConfig) -> Path:
         raise ValueError(
             f"private daemon CLI is not a file: {config.private_daemon_cli}"
         )
+    if config.memory_db_seed is not None and not config.memory_db_seed.is_file():
+        raise ValueError(f"memory DB seed is not a file: {config.memory_db_seed}")
+    for path, expected_digest in config.acceptance_inputs.items():
+        if not path.is_absolute():
+            raise ValueError(f"acceptance input must be absolute: {path}")
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"acceptance input must be a regular file: {path}")
+        _validate_expected_digest(expected_digest, f"acceptance input {path}")
+        if _file_sha256(path) != expected_digest:
+            raise ValueError(f"acceptance input digest does not match: {path}")
+    for relative_path, expected_digest in config.immutable_worktree_paths.items():
+        path = Path(relative_path)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise ValueError(
+                f"immutable worktree path must be a safe relative path: {relative_path}"
+            )
+        _validate_expected_digest(
+            expected_digest, f"immutable worktree path {relative_path}"
+        )
+    if (
+        config.telemetry_relative_dir.is_absolute()
+        or ".." in config.telemetry_relative_dir.parts
+        or not config.telemetry_relative_dir.parts
+    ):
+        raise ValueError("telemetry_relative_dir must be a safe relative path")
 
     requested_repo = task.target_repo.resolve(strict=True)
     actual_repo = Path(_git(requested_repo, "rev-parse", "--show-toplevel")).resolve()
@@ -401,9 +459,21 @@ def _invoke_trajectory(
     trajectory_dir: Path,
     initial_budget_used: Mapping[str, float],
 ) -> TrajectoryResult:
+    if config.memory_db_seed is not None:
+        memory_path = worktree / ".synth" / "synth.db"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config.memory_db_seed, memory_path)
+
+    baseline_failures = _acceptance_integrity_failures(config, worktree)
+    if baseline_failures:
+        raise BatchDriverError(
+            "acceptance inputs did not match their baseline before the trajectory: "
+            + ", ".join(baseline_failures)
+        )
+
     session_dir = trajectory_dir / "session"
     session_dir.mkdir()
-    daemon_socket = trajectory_dir / "daemon.sock"
+    daemon_socket = worktree.parent / f"daemon-{index}.sock"
     command = [
         *config.cli_argv,
         *config.cli_config_args,
@@ -461,10 +531,54 @@ def _invoke_trajectory(
                 environment=env,
             )
 
+    acceptance_exit_code: int | None = None
+    acceptance_stdout = ""
+    acceptance_stderr = ""
+    acceptance_timed_out = False
+    acceptance_integrity_failures = (
+        _acceptance_integrity_failures(config, worktree)
+        if config.acceptance_argv and not timed_out and exit_code == 0
+        else ()
+    )
+    if acceptance_integrity_failures:
+        acceptance_exit_code = 125
+        acceptance_stderr = (
+            "acceptance integrity failure: "
+            + ", ".join(acceptance_integrity_failures)
+            + "\n"
+        )
+    elif config.acceptance_argv and not timed_out and exit_code == 0:
+        acceptance_env = env.copy()
+        acceptance_env["SYNTH_ACCEPTANCE_WORKTREE"] = str(worktree)
+        try:
+            acceptance = subprocess.run(
+                config.acceptance_argv,
+                cwd=worktree,
+                env=acceptance_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=config.acceptance_timeout_seconds,
+            )
+            acceptance_exit_code = acceptance.returncode
+            acceptance_stdout = acceptance.stdout
+            acceptance_stderr = acceptance.stderr
+        except subprocess.TimeoutExpired as error:
+            acceptance_timed_out = True
+            acceptance_exit_code = 124
+            acceptance_stdout = _timeout_output(error.stdout)
+            acceptance_stderr = _timeout_output(error.stderr)
+
     (trajectory_dir / "stdout.txt").write_text(stdout)
     (trajectory_dir / "stderr.txt").write_text(stderr)
+    (trajectory_dir / "acceptance-stdout.txt").write_text(acceptance_stdout)
+    (trajectory_dir / "acceptance-stderr.txt").write_text(acceptance_stderr)
     diff = _capture_diff(worktree)
     (trajectory_dir / "diff.patch").write_text(diff)
+    telemetry_files = _preserve_telemetry(
+        worktree / config.telemetry_relative_dir,
+        trajectory_dir / "telemetry",
+    )
     session_jsonl = _find_session_jsonl(session_dir)
     budget = (
         parse_budget_text(session_jsonl.read_text())
@@ -480,7 +594,60 @@ def _invoke_trajectory(
         budget=budget,
         diff=diff,
         timed_out=timed_out,
+        acceptance_exit_code=acceptance_exit_code,
+        acceptance_stdout=acceptance_stdout,
+        acceptance_stderr=acceptance_stderr,
+        acceptance_timed_out=acceptance_timed_out,
+        acceptance_integrity_failures=acceptance_integrity_failures,
+        telemetry_files=telemetry_files,
     )
+
+
+def _acceptance_integrity_failures(
+    config: BatchDriverConfig, worktree: Path
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for path, expected_digest in config.acceptance_inputs.items():
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or _file_sha256(path) != expected_digest
+        ):
+            failures.append(str(path))
+    for relative_path, expected_digest in config.immutable_worktree_paths.items():
+        path = worktree / relative_path
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or _file_sha256(path) != expected_digest
+        ):
+            failures.append(relative_path)
+    return tuple(failures)
+
+
+def _validate_expected_digest(digest: str, label: str) -> None:
+    if _SHA256_PATTERN.fullmatch(digest) is None:
+        raise ValueError(f"{label} must have a lowercase SHA-256 digest")
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _preserve_telemetry(source: Path, destination: Path) -> tuple[Path, ...]:
+    if not source.is_dir():
+        return ()
+    destination.mkdir()
+    preserved: list[Path] = []
+    for path in sorted(source.rglob("*.jsonl")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative_path = path.relative_to(source)
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        preserved.append(target)
+    return tuple(preserved)
 
 
 def _find_session_jsonl(session_dir: Path) -> Path | None:
@@ -558,6 +725,8 @@ def _record_candidate(
             "trajectory": trajectory.index,
             "session_jsonl": str(trajectory.session_jsonl),
             "exit_code": trajectory.exit_code,
+            "acceptance_exit_code": trajectory.acceptance_exit_code,
+            "acceptance_timed_out": trajectory.acceptance_timed_out,
         },
     )
 
@@ -594,6 +763,11 @@ def _write_trajectory_metadata(
             "trajectory": result.index,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
+            "acceptance_exit_code": result.acceptance_exit_code,
+            "acceptance_timed_out": result.acceptance_timed_out,
+            "acceptance_integrity_failures": list(result.acceptance_integrity_failures),
+            "acceptance_stdout": "acceptance-stdout.txt",
+            "acceptance_stderr": "acceptance-stderr.txt",
             "stdout": "stdout.txt",
             "stderr": "stderr.txt",
             "diff": "diff.patch",
@@ -602,6 +776,9 @@ def _write_trajectory_metadata(
             "verification": verification,
             "candidate": candidate_number,
             "next_action": action,
+            "telemetry": [
+                str(path.relative_to(trajectory_dir)) for path in result.telemetry_files
+            ],
         },
     )
 

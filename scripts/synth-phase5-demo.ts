@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, type Context, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import synthExtension from "../.prime/agent/extensions/synth/index.js";
+import { loadSynthConfig } from "../.prime/agent/extensions/synth/config.js";
 import {
 	appendActivePlan,
 	extractLastPlan,
 	parseVerification,
+	VerifierClient,
 } from "../.prime/agent/extensions/synth/verifier.js";
 import { emitSessionShutdownEvent } from "../packages/coding-agent/src/core/extensions/runner.js";
 import { createHarness } from "../packages/coding-agent/test/suite/harness.js";
@@ -189,6 +191,117 @@ try {
 	const plan = extractLastPlan("old <plan>[ ] first</plan> new <plan>[~] corrected</plan>");
 	assert.equal(plan, "<plan>[~] corrected</plan>");
 	assert.ok(appendActivePlan("Summary", plan).endsWith(`## Active Plan\n\n${plan}`));
+
+	const originalFetch = globalThis.fetch;
+	delete process.env.SYNTH_VERIFIER_FIXTURE;
+	let responsesRequest: { url?: string; body?: Record<string, unknown> } = {};
+	const liveFixtureJson = JSON.stringify({
+		verification: "The live-protocol fixture satisfies the constraint.",
+		decision: "SUCCESS",
+		justification: "The Responses payload and parser are connected.",
+		trajectory_summary: "The verifier returned structured output text.",
+		details: {},
+	});
+	globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+		responsesRequest = {
+			url: String(input),
+			body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+		};
+		if (String(input).endsWith("/chat/completions")) {
+			return new Response(
+				JSON.stringify({ choices: [{ message: { content: liveFixtureJson } }] }),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
+		const splitAt = Math.floor(liveFixtureJson.length / 2);
+		return new Response(
+			JSON.stringify({
+				status: "completed",
+				output: [
+					{
+						type: "message",
+						content: [
+							{ type: "output_text", text: liveFixtureJson.slice(0, splitAt) },
+							{ type: "output_text", text: liveFixtureJson.slice(splitAt) },
+						],
+					},
+				],
+			}),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+	};
+	try {
+		const result = await new VerifierClient({
+			baseUrl: "https://api.openai.com/v1",
+			model: "gpt-5.4-mini",
+			smallModel: "gpt-5.4-mini",
+			apiKeyEnv: "SYNTH_TEST_UNUSED_API_KEY",
+			api: "openai-responses",
+		}).verify("Verify the Responses API path");
+		assert.equal(result.decision, "SUCCESS");
+		assert.equal(responsesRequest.url, "https://api.openai.com/v1/responses");
+		assert.equal(responsesRequest.body?.input, "Verify the Responses API path");
+		assert.equal(responsesRequest.body?.store, false);
+		assert.ok(!Object.hasOwn(responsesRequest.body ?? {}, "messages"));
+
+		const chatResult = await new VerifierClient({
+			baseUrl: "http://localhost:8000/v1",
+			model: "local-main",
+			smallModel: "local-small",
+			apiKeyEnv: "SYNTH_TEST_UNUSED_API_KEY",
+			api: "openai-completions",
+		}).verify("Verify the Chat Completions path");
+		assert.equal(chatResult.decision, "SUCCESS");
+		assert.equal(responsesRequest.url, "http://localhost:8000/v1/chat/completions");
+		assert.deepEqual(responsesRequest.body?.messages, [
+			{ role: "user", content: "Verify the Chat Completions path" },
+		]);
+		assert.equal(responsesRequest.body?.temperature, 0);
+		assert.ok(!Object.hasOwn(responsesRequest.body ?? {}, "input"));
+
+		globalThis.fetch = async () =>
+			new Response(
+				JSON.stringify({
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		await assert.rejects(
+			new VerifierClient({
+				baseUrl: "https://api.openai.com/v1",
+				model: "gpt-5.4-mini",
+				smallModel: "gpt-5.4-mini",
+				apiKeyEnv: "SYNTH_TEST_UNUSED_API_KEY",
+				api: "openai-responses",
+			}).verify("Reject incomplete output"),
+			/max_output_tokens/,
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		process.env.SYNTH_VERIFIER_FIXTURE = fixturePath;
+	}
+
+	const configFixtureDir = join(demoDir, "config-fixture");
+	mkdirSync(configFixtureDir);
+	const configFixturePath = join(configFixtureDir, "synth.json");
+	const endpointFixture = {
+		baseUrl: "http://localhost:8000/v1",
+		model: "local-main",
+		smallModel: "local-small",
+		apiKeyEnv: "SYNTH_LOCAL_API_KEY",
+	};
+	writeFileSync(configFixturePath, JSON.stringify({ endpoint: endpointFixture }));
+	const defaultProtocol = loadSynthConfig(configFixtureDir);
+	assert.equal(defaultProtocol.state, "loaded");
+	assert.equal(defaultProtocol.config?.endpoint?.api, "openai-completions");
+	writeFileSync(
+		configFixturePath,
+		JSON.stringify({ endpoint: { ...endpointFixture, api: "openai-responses" } }),
+	);
+	assert.equal(loadSynthConfig(configFixtureDir).config?.endpoint?.api, "openai-responses");
+	writeFileSync(configFixturePath, JSON.stringify({ endpoint: { ...endpointFixture, api: "bad" } }));
+	assert.equal(loadSynthConfig(configFixtureDir).state, "invalid");
 
 	const targetRepo = join(demoDir, "batch-target");
 	mkdirSync(targetRepo);

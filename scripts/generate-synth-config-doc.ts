@@ -32,6 +32,12 @@ function requiredNames(schema: Record<string, unknown>): Set<string> {
 }
 
 function schemaType(schema: Record<string, unknown>): string {
+	if (Array.isArray(schema.anyOf)) {
+		const literals = schema.anyOf.flatMap((entry) =>
+			isRecord(entry) && typeof entry.const === "string" ? [entry.const] : [],
+		);
+		if (literals.length === schema.anyOf.length && literals.length > 0) return literals.join(" | ");
+	}
 	return typeof schema.type === "string" ? schema.type : "unknown";
 }
 
@@ -60,8 +66,10 @@ function collectRows(
 	for (const [name, rawChild] of Object.entries(schemaProperties(schema))) {
 		if (!isRecord(rawChild)) continue;
 		const path = [...prefix, name];
-		const presentByDefault = Object.hasOwn(defaultObject, name);
-		const childDefault = presentByDefault ? defaultObject[name] : undefined;
+		const inheritedDefault = Object.hasOwn(defaultObject, name);
+		const schemaDefault = Object.hasOwn(rawChild, "default");
+		const presentByDefault = inheritedDefault || schemaDefault;
+		const childDefault = inheritedDefault ? defaultObject[name] : rawChild.default;
 		const childRequired = required.has(name);
 		const childProperties = schemaProperties(rawChild);
 		if (Object.keys(childProperties).length > 0) {
