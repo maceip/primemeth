@@ -19,12 +19,12 @@ from typing import Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-EngineName = Literal["transformers", "mlx", "llama.cpp"]
+EngineName = Literal["transformers", "mlx", "llama.cpp", "mtplx"]
 TransformersEngineName = Literal["transformers"]
 Quantization = Literal["bnb-4bit", "bnb-8bit"]
 DeviceName = Literal["mps", "auto", "cpu"]
 
-ENGINE_NAMES: tuple[EngineName, ...] = ("transformers", "mlx", "llama.cpp")
+ENGINE_NAMES: tuple[EngineName, ...] = ("transformers", "mlx", "llama.cpp", "mtplx")
 SETUP_ENGINE_NAMES: tuple[TransformersEngineName, ...] = ("transformers",)
 QUANTIZATIONS: tuple[Quantization, ...] = ("bnb-4bit", "bnb-8bit")
 DEVICE_NAMES: tuple[DeviceName, ...] = ("mps", "auto", "cpu")
