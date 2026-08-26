@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "local": {
+      "baseUrl": "http://localhost:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "SYNTH_LOCAL_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "local-main",
+          "name": "Local Main"
+        },
+        {
+          "id": "local-small",
+          "name": "Local Small"
+        }
+      ]
+    }
+  }
+}

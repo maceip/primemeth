@@ -465,7 +465,7 @@ describe("default model selection", () => {
 		expect(result.thinkingLevel).toBe("medium");
 	});
 
-	test("findInitialModel prefers GLM 5.2 when Prime Inference is configured", async () => {
+	test("findInitialModel uses normal provider order when Prime Inference is configured", async () => {
 		const anthropicModel: Model<"anthropic-messages"> = {
 			...mockModels[0],
 			id: "claude-opus-4-7",
@@ -493,7 +493,30 @@ describe("default model selection", () => {
 			modelRegistry: registry,
 		});
 
-		expect(result.model).toBe(primeModel);
+		expect(result.model).toBe(anthropicModel);
+	});
+
+	test("findInitialModel honors a saved local provider default", async () => {
+		const localModel: Model<"anthropic-messages"> = {
+			...mockModels[0],
+			id: "local-main",
+			name: "Local Main",
+			provider: "local",
+			baseUrl: "http://localhost:8000/v1",
+		};
+		const registry = {
+			refreshAvailableModels: async () => [localModel, ...mockModels],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "local",
+			defaultModelId: "local-main",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBe(localModel);
 	});
 
 	test("findInitialModel uses another provider default when Prime Inference is not configured", async () => {

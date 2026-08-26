@@ -120,3 +120,17 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Build the original broad static/interceptor test harness before exercising the product; require the full faux suite at every focused commit; defer the live demo until Phase 8.
 - Why: The operator's standing directive prioritizes a connected, demonstrably useful capability over early conformance scaffolding. The interceptor remains an important final offline acceptance check, but it does not move a Phase 1 runtime capability and is more valuable alongside Phase 8 network-failure injection.
 - Affected files: `PHASE1_PLAN.md`, future `scripts/synth-demo.sh`, `tests/harness_regression/test_no_vendor_hosts.py`, Phase 1 gate evidence, and the deferred Phase 8 offline e2e.
+
+## 2026-08-25 — D-0018: Bootstrap the kernel with the enabled Python-skill set
+
+- Decision: `scripts/setup-offline.sh` invokes a repository-side bootstrap wrapper that resolves the same enabled skill resources as Prime Agent and passes their Python packages to the existing `ensureKernelPython` bootstrap API. It does not invoke the bare `bootstrap-cli.ts` entry point.
+- Alternatives: Invoke the requested bare bootstrap CLI; provision only the base kernel and rely on the first runtime session to install skills; patch the vendored bootstrap CLI to discover resources.
+- Why: The bare CLI calls `ensureKernelPython()` without `pythonSkills`. On an existing skill-aware environment this rewrites `.bootstrap-version` with an empty skill set, and on a fresh environment it leaves Python-backed bundled skills for a later potentially offline session. The extension API cannot provision dependencies before runtime, while a setup-side wrapper can use the existing public bootstrap and resource-loader behavior without an additional vendored-tree patch.
+- Affected files: `scripts/setup-offline.sh`, `scripts/bootstrap-synth-kernel.ts`; the Phase 1 setup requirement is adapted from the bare CLI to its skill-aware core API.
+
+## 2026-08-25 — D-0019: Keep the A1 fallback regression beside the private selector
+
+- Decision: Update `packages/coding-agent/test/model-resolver.test.ts` with focused regressions for normal fallback order and the configured local default.
+- Alternatives: Exercise only the public CLI in `scripts/synth-demo.sh`; copy model-selection logic into an overlay test; expose another core API solely for testing.
+- Why: A1 is a permitted core fallback change, but the extension API cannot invoke the private startup fallback selector with controlled model snapshots. The package-local unit regression directly protects the changed behavior without duplicating it or widening the runtime API.
+- Affected files: `packages/coding-agent/test/model-resolver.test.ts`.

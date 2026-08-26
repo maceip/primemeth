@@ -1,0 +1,1 @@
+- Changed startup fallback selection to honor normal provider order instead of preferring Prime Inference.

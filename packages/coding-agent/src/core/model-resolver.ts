@@ -171,13 +171,6 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
 }
 
 function findPreferredDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined {
-	const primeInferenceDefault = availableModels.find(
-		(model) => model.provider === "prime-inference" && model.id === PRIME_INFERENCE_DEFAULT_MODEL_ID,
-	);
-	if (primeInferenceDefault) {
-		return primeInferenceDefault;
-	}
-
 	for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
 		const defaultId = defaultModelPerProvider[provider];
 		const match = availableModels.find((model) => model.provider === provider && model.id === defaultId);

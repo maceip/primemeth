@@ -36,9 +36,19 @@ npm install
 npm run build
 ```
 
-The upstream AI build currently refreshes its model catalog from remote hosts. Phase 1 removes that build-time regeneration and establishes the offline path; the current baseline must not be described as offline-hardened.
+The AI build uses its pinned model catalog and does not regenerate it from remote hosts. Phase 1 establishes the remaining local-first defaults; the branch is not fully offline-hardened until that gate is complete.
 
-Overlay Python must run through a uv-managed Python 3.12 environment. Do not use the host `python3` or an unpinned `pip` environment. `scripts/setup-offline.sh` is the Phase 1 bootstrap deliverable; until it exists, there is no supported overlay-runtime setup command.
+Overlay Python must run through a uv-managed Python 3.12 environment. Do not use the host `python3` or an unpinned `pip` environment.
+
+Run the one-time local setup from the repository root:
+
+```bash
+scripts/setup-offline.sh
+```
+
+The script installs the locked Python 3.12 overlay, provisions Prime Agent's separate Python 3.11 kernel, prefetches the local embedding model, and additively merges the tracked `local` provider into the active agent-directory `models.json`. It never replaces existing provider values or model definitions. Changed JSONC catalogs are normalized to JSON; a semantic no-op preserves the original file bytes and timestamp.
+
+The shipped project settings select `local/local-main`. The tracked template points at `http://localhost:8000/v1`; edit the installed agent-directory catalog if the local OpenAI-compatible endpoint uses a different port or model IDs. `SYNTH_LOCAL_API_KEY` is a configuration reference, not a vendor credential; local servers that ignore authentication may use any nonempty value.
 
 Fetch the exact research snapshots recorded for this baseline with:
 
