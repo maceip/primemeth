@@ -11,6 +11,7 @@ summary_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/synth-lo
 setup_script="${script_dir}/setup-offline.sh"
 tsx_path="${synth_root}/node_modules/.bin/tsx"
 phase2_driver_path="${script_dir}/synth-phase2-demo.ts"
+phase3_driver_path="${script_dir}/synth-phase3-demo.ts"
 wiring_script="${script_dir}/check-wiring.sh"
 
 for required_command in git node npm perl tmux; do
@@ -75,6 +76,7 @@ for required_file in \
 	"${setup_script}" \
 	"${tsx_path}" \
 	"${phase2_driver_path}" \
+	"${phase3_driver_path}" \
 	"${wiring_script}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
@@ -435,9 +437,9 @@ tmux send-keys -t "${demo_tui_pane}" Enter
 demo_synth_status=0
 for ((demo_attempt = 0; demo_attempt < 80; demo_attempt++)); do
 	demo_tui_capture="$(tmux capture-pane -t "${demo_tui_pane}" -p -S -)"
-	if grep -Fq 'Synth status' <<<"${demo_tui_capture}" && \
-		grep -Fq 'configEcho=' <<<"${demo_tui_capture}" && \
-		grep -Eq 'bridge=up pid=[0-9]+ protocol=1 memory=pending' <<<"${demo_tui_capture}"; then
+	if grep -Fq 'configEcho=' <<<"${demo_tui_capture}" && \
+		grep -Eq 'bridge=up pid=[0-9]+ protocol=1 memory=pending' <<<"${demo_tui_capture}" && \
+		grep -Fq 'budgets=[Budget:' <<<"${demo_tui_capture}"; then
 		demo_synth_status=1
 		break
 	fi
@@ -846,6 +848,18 @@ printf 'synth-demo: pre-run process receipt phase2_driver=absent bridge_fixture=
 	uv run --project . --no-sync synth telemetry validate "${phase2_telemetry}"
 )
 printf 'synth-demo: Phase 2 mirrored telemetry validation PASS\n'
+
+phase3_telemetry="${demo_dir}/phase3-telemetry.jsonl"
+(
+	cd "${synth_root}"
+	SYNTH_PHASE3_TELEMETRY_OUT="${phase3_telemetry}" \
+		"${tsx_path}" "${phase3_driver_path}"
+)
+(
+	cd "${synth_root}"
+	uv run --project . --no-sync synth telemetry validate "${phase3_telemetry}"
+)
+printf 'synth-demo: Phase 3 BATS transcript and mirrored telemetry PASS\n'
 
 bridge_output="$({
 	printf '%s\n' 'not-json'

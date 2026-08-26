@@ -12,7 +12,9 @@
 		"ipython": 60,
 		"subagents": 4,
 		"tokens": 0,
-		"costUsd": 0
+		"costUsd": 0,
+		"elideToolResponsesAfterTurns": 3,
+		"noneAnswerThreshold": 3
 	},
 	"memory": {
 		"enabled": false,

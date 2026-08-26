@@ -140,10 +140,10 @@ try {
 	const secondStatus = customMessages(harness.session.messages).at(-1);
 	assert.match(secondStatus ?? "", /bridge=disabled error=bridge exited unexpectedly/);
 	await harness.session.prompt("/synth budget");
-	assert.match(
-		customMessages(harness.session.messages).at(-1) ?? "",
-		/Synth budget configuration/,
-	);
+	const budgetStatus = customMessages(harness.session.messages).at(-1) ?? "";
+	assert.match(budgetStatus, /Synth budget state/);
+	assert.match(budgetStatus, /<budget>/);
+	assert.match(budgetStatus, /Regime: HIGH/);
 
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("echo", { text: "phase-two" }), {

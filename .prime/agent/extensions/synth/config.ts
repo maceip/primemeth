@@ -26,9 +26,22 @@ const BudgetsSchema = Type.Object(
 		subagents: Type.Integer({ minimum: 0 }),
 		tokens: Type.Integer({ minimum: 0 }),
 		costUsd: Type.Number({ minimum: 0 }),
+		elideToolResponsesAfterTurns: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+		noneAnswerThreshold: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
 	},
 	{ additionalProperties: false },
 );
+
+export interface SynthBudgetConfig {
+	bash: number;
+	edit: number;
+	ipython: number;
+	subagents: number;
+	tokens: number;
+	costUsd: number;
+	elideToolResponsesAfterTurns: number;
+	noneAnswerThreshold: number;
+}
 
 const MemorySchema = Type.Object(
 	{
@@ -96,7 +109,7 @@ export type SynthConfigFile = Static<typeof SynthConfigSchema>;
 export interface SynthConfig {
 	endpoint?: Static<typeof EndpointSchema>;
 	telemetry: Static<typeof TelemetryConfigSchema>;
-	budgets: Static<typeof BudgetsSchema>;
+	budgets: SynthBudgetConfig;
 	memory: Static<typeof MemorySchema>;
 	verifier: Static<typeof VerifierSchema>;
 	optimizer: Static<typeof OptimizerSchema>;
@@ -113,7 +126,16 @@ export interface SynthConfigLoadResult {
 
 const DEFAULT_CONFIG: Omit<SynthConfig, "endpoint"> = {
 	telemetry: { dir: ".synth/telemetry" },
-	budgets: { bash: 0, edit: 0, ipython: 0, subagents: 0, tokens: 0, costUsd: 0 },
+	budgets: {
+		bash: 0,
+		edit: 0,
+		ipython: 0,
+		subagents: 0,
+		tokens: 0,
+		costUsd: 0,
+		elideToolResponsesAfterTurns: 3,
+		noneAnswerThreshold: 3,
+	},
 	memory: {
 		enabled: false,
 		k: 3,
@@ -151,7 +173,7 @@ function normalizeConfig(cwd: string, value: SynthConfigFile): SynthConfig {
 	const config: SynthConfig = {
 		...(value.endpoint ? { endpoint: value.endpoint } : {}),
 		telemetry: value.telemetry ?? DEFAULT_CONFIG.telemetry,
-		budgets: value.budgets ?? DEFAULT_CONFIG.budgets,
+		budgets: { ...DEFAULT_CONFIG.budgets, ...value.budgets },
 		memory: value.memory ?? DEFAULT_CONFIG.memory,
 		verifier: value.verifier ?? DEFAULT_CONFIG.verifier,
 		optimizer: value.optimizer ?? DEFAULT_CONFIG.optimizer,

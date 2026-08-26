@@ -9058,9 +9058,18 @@ export class AgentSession {
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
-			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
-				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
-			})),
+			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => {
+				const admission = await this._extensionRunner.emitToolCall({
+					type: "tool_call",
+					toolName: "rlm.run",
+					toolCallId: `rlm.run:${randomUUID()}`,
+					input: { prompt, kwargs },
+				});
+				if (admission?.block) {
+					throw new Error(admission.reason ?? "Extension blocked the subagent spawn");
+				}
+				return { ...(await this.runRlmChild(prompt, kwargs, cellSourceCode)) };
+			}),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),

@@ -12,5 +12,5 @@
 			"typebox": ["../../../../node_modules/typebox"]
 		}
 	},
-	"include": ["./*.ts", "../../../../scripts/synth-phase2-demo.ts"]
+	"include": ["./*.ts", "../../../../scripts/synth-phase2-demo.ts", "../../../../scripts/synth-phase3-demo.ts"]
 }

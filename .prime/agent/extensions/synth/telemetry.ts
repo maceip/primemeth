@@ -59,6 +59,37 @@ const ProviderExchangeSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const BudgetCounterSchema = Type.Object(
+	{
+		limit: Type.Number({ minimum: 0 }),
+		used: Type.Number({ minimum: 0 }),
+		remaining: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+		unlimited: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
+
+export const BudgetSnapshotSchema = Type.Object(
+	{
+		bash: BudgetCounterSchema,
+		edit: BudgetCounterSchema,
+		ipython: BudgetCounterSchema,
+		subagents: BudgetCounterSchema,
+		tokens: BudgetCounterSchema,
+		costUsd: BudgetCounterSchema,
+		regime: Type.Union([
+			Type.Literal("HIGH"),
+			Type.Literal("MEDIUM"),
+			Type.Literal("LOW"),
+			Type.Literal("CRITICAL"),
+		]),
+		fullyExhausted: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
+
+export type BudgetSnapshot = Static<typeof BudgetSnapshotSchema>;
+
 const TelemetryKindSchema = Type.Union([
 	Type.Literal("session.start"),
 	Type.Literal("session.shutdown"),
@@ -67,6 +98,7 @@ const TelemetryKindSchema = Type.Union([
 	Type.Literal("provider"),
 	Type.Literal("agent.end"),
 	Type.Literal("bridge"),
+	Type.Literal("budget"),
 ]);
 
 export const TelemetryEventSchema = Type.Object(
@@ -82,6 +114,7 @@ export const TelemetryEventSchema = Type.Object(
 		usage: Type.Optional(UsageSchema),
 		tool: Type.Optional(ToolExchangeSchema),
 		provider: Type.Optional(ProviderExchangeSchema),
+		budget: Type.Optional(BudgetSnapshotSchema),
 		transcript: Type.Optional(TranscriptPointerSchema),
 		errorClass: Type.Optional(Type.String()),
 		data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
@@ -208,6 +241,10 @@ export class TelemetryWriter {
 		if (!Value.Check(TelemetryEventSchema, event)) {
 			this.sequence--;
 			throw new Error("telemetry event failed its TypeBox schema");
+		}
+		if (event.kind === "budget" && event.budget === undefined) {
+			this.sequence--;
+			throw new Error("budget telemetry event requires a snapshot");
 		}
 		appendFileSync(this.path, `${JSON.stringify(event)}\n`, "utf8");
 		return event;

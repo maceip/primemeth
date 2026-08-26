@@ -1,0 +1,1 @@
+- Added extension admission checks for RLM subagent spawns so runtime budgets can block them before child creation.

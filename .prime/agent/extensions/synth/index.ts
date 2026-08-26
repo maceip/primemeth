@@ -3,9 +3,27 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BridgeClient, BridgeRequestError } from "./bridge.js";
+import {
+	assistantStalled,
+	BATS_CONTINUATION_NUDGE,
+	BATS_ELISION_MARKER,
+	BATS_WRAP_UP_INSTRUCTION,
+	BudgetTracker,
+	elideOldToolResponses,
+	formatBudgetBlock,
+	formatBudgetStatusLine,
+	injectBatsSystemPrompt,
+	shouldSendContinuationNudge,
+} from "./budget.js";
 import { loadSynthConfig, resolveDataPlanePath, type SynthConfig, type SynthConfigLoadResult } from "./config.js";
 import { controlPlaneBlockReason } from "./guard.js";
-import { copyUsage, digestValue, TelemetryWriter, type TelemetryEventInput } from "./telemetry.js";
+import {
+	type BudgetSnapshot,
+	copyUsage,
+	digestValue,
+	TelemetryWriter,
+	type TelemetryEventInput,
+} from "./telemetry.js";
 
 interface TranscriptRef {
 	sessionFile: string;
@@ -32,10 +50,15 @@ interface SessionRuntime {
 	configLoad: SynthConfigLoadResult;
 	telemetry?: TelemetryWriter;
 	bridge?: BridgeClient;
+	budget?: BudgetTracker;
 	warnings: Set<string>;
 	turnStarts: Map<number, number>;
 	toolStarts: Map<string, ToolStart>;
 	providers: Map<number, ProviderExchange>;
+	initialBudgetInjected: boolean;
+	allowedToolCallsThisTurn: number;
+	noToolCount: number;
+	nudgePending: boolean;
 }
 
 function errorMessage(error: unknown): string {
@@ -72,9 +95,12 @@ function commandOutput(pi: ExtensionAPI, text: string): void {
 	);
 }
 
-function formatBudgets(config: SynthConfig): string {
+function formatBudgets(config: SynthConfig, budget?: BudgetTracker): string {
+	if (budget) {
+		return formatBudgetStatusLine(budget.snapshot());
+	}
 	const { bash, edit, ipython, subagents, tokens, costUsd } = config.budgets;
-	return `bash=${bash} edit=${edit} ipython=${ipython} subagents=${subagents} tokens=${tokens} costUsd=${costUsd}`;
+	return `configured bash=${bash} edit=${edit} ipython=${ipython} subagents=${subagents} tokens=${tokens} costUsd=${costUsd}`;
 }
 
 function createRuntime(cwd: string): SessionRuntime {
@@ -84,6 +110,62 @@ function createRuntime(cwd: string): SessionRuntime {
 		turnStarts: new Map(),
 		toolStarts: new Map(),
 		providers: new Map(),
+		initialBudgetInjected: false,
+		allowedToolCallsThisTurn: 0,
+		noToolCount: 0,
+		nudgePending: false,
+	};
+}
+
+function contentText(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.flatMap((item) =>
+			item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item
+				? [String(item.text)]
+				: [],
+		)
+		.join("\n");
+}
+
+function messageContains(message: AgentMessage, text: string): boolean {
+	return "content" in message && contentText(message.content).includes(text);
+}
+
+function appendBudgetToUser(message: AgentMessage, snapshot: BudgetSnapshot): AgentMessage {
+	if (message.role !== "user" || messageContains(message, "<budget>")) {
+		return message;
+	}
+	const block = formatBudgetBlock(snapshot);
+	return {
+		...message,
+		content:
+			typeof message.content === "string"
+				? `${message.content}${block}`
+				: [...message.content, { type: "text", text: block }],
+	};
+}
+
+function toolBudgetText(snapshot: BudgetSnapshot): string {
+	return `${snapshot.fullyExhausted ? `${BATS_WRAP_UP_INSTRUCTION}\n` : ""}${formatBudgetBlock(snapshot)}`;
+}
+
+function appendBudgetToToolResult(message: AgentMessage, snapshot: BudgetSnapshot): AgentMessage {
+	if (
+		message.role !== "toolResult" ||
+		messageContains(message, "<budget>") ||
+		messageContains(message, BATS_ELISION_MARKER)
+	) {
+		return message;
+	}
+	return {
+		...message,
+		content: [...message.content, { type: "text", text: toolBudgetText(snapshot) }],
 	};
 }
 
@@ -173,6 +255,25 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	function persistBudget(
+		runtime: SessionRuntime,
+		ctx: ExtensionContext,
+		reason: string,
+		data: Record<string, unknown> = {},
+	): void {
+		if (!runtime.budget) {
+			return;
+		}
+		const pointer = transcript(ctx);
+		appendTelemetry(runtime, ctx, {
+			sessionId: ctx.sessionManager.getSessionId(),
+			kind: "budget",
+			budget: runtime.budget.snapshot(),
+			...(pointer ? { transcript: pointer } : {}),
+			data: { reason, ...data },
+		});
+	}
+
 	function bridgeFor(runtime: SessionRuntime, ctx: ExtensionContext): BridgeClient | undefined {
 		const config = runtime.configLoad.config;
 		if (runtime.configLoad.state !== "loaded" || !config || config.killSwitch.all) {
@@ -222,7 +323,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			`telemetry=${runtime.telemetry?.path ?? "off"}`,
 			bridgeLine,
 			`memory=${config.memory.enabled ? "configured" : "off"}`,
-			`budgets=${formatBudgets(config)}`,
+			`budgets=${formatBudgets(config, runtime.budget)}`,
 		].join("\n");
 	}
 
@@ -279,7 +380,11 @@ export default function synthExtension(pi: ExtensionAPI): void {
 				const config = runtime.configLoad.config;
 				commandOutput(
 					pi,
-					config ? `Synth budget configuration\n${formatBudgets(config)}` : "Synth budgets are off.",
+					config
+						? runtime.budget
+							? `Synth budget state${formatBudgetBlock(runtime.budget.snapshot())}`
+							: `Synth budget configuration\n${formatBudgets(config)}`
+						: "Synth budgets are off.",
 				);
 				return;
 			}
@@ -298,20 +403,36 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.configLoad.state !== "loaded" || !config || config.killSwitch.all) {
 			return;
 		}
+		runtime.initialBudgetInjected = ctx.sessionManager
+			.getBranch()
+			.some((entry) => entry.type === "message" && messageContains(entry.message, "<budget>"));
+		let telemetryFailed = false;
 		try {
 			const telemetryDir = resolveDataPlanePath(ctx.cwd, config.telemetry.dir);
 			runtime.telemetry = new TelemetryWriter(telemetryDir, ctx.sessionManager.getSessionId());
-			const pointer = transcript(ctx);
-			appendTelemetry(runtime, ctx, {
-				sessionId: ctx.sessionManager.getSessionId(),
-				kind: "session.start",
-				...(pointer ? { transcript: pointer } : {}),
-				data: { reason: event.reason, configPath: runtime.configLoad.path },
-			});
 		} catch (error) {
+			telemetryFailed = true;
 			runtime.telemetry = undefined;
 			warn(runtime, ctx, "telemetry", `telemetry unavailable; running vanilla: ${errorMessage(error)}`);
 		}
+		try {
+			runtime.budget = runtime.telemetry
+				? BudgetTracker.fromTelemetry(config.budgets, runtime.telemetry.path)
+				: telemetryFailed
+					? BudgetTracker.exhausted(config.budgets)
+					: new BudgetTracker(config.budgets);
+		} catch (error) {
+			runtime.budget = BudgetTracker.exhausted(config.budgets);
+			warn(runtime, ctx, "budget", `budget recovery failed closed: ${errorMessage(error)}`);
+		}
+		const pointer = transcript(ctx);
+		appendTelemetry(runtime, ctx, {
+			sessionId: ctx.sessionManager.getSessionId(),
+			kind: "session.start",
+			...(pointer ? { transcript: pointer } : {}),
+			data: { reason: event.reason, configPath: runtime.configLoad.path },
+		});
+		persistBudget(runtime, ctx, "session_start", { restored: event.reason === "resume" });
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
@@ -319,6 +440,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (!runtime) {
 			return;
 		}
+		persistBudget(runtime, ctx, "session_shutdown");
 		const pointer = transcript(ctx);
 		appendTelemetry(runtime, ctx, {
 			sessionId: ctx.sessionManager.getSessionId(),
@@ -332,6 +454,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 
 	pi.on("turn_start", (event, ctx) => {
 		const runtime = runtimeFor(ctx);
+		runtime.allowedToolCallsThisTurn = 0;
 		const startedAt = performance.now();
 		runtime.turnStarts.set(event.turnIndex, startedAt);
 		runtime.providers.set(event.turnIndex, {
@@ -344,13 +467,71 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		});
 	});
 
+	pi.on("before_agent_start", (event, ctx) => {
+		const budget = runtimeFor(ctx).budget;
+		if (!budget) {
+			return undefined;
+		}
+		return { systemPrompt: injectBatsSystemPrompt(event.systemPrompt, budget.snapshot()) };
+	});
+
 	pi.on("context", (event, ctx) => {
-		const provider = latestProvider(runtimeFor(ctx));
+		const runtime = runtimeFor(ctx);
+		let messages = event.messages;
+		if (runtime.budget) {
+			const snapshot = runtime.budget.snapshot();
+			let firstUserSeen = false;
+			messages = elideOldToolResponses(
+				messages.map((message) => {
+					if (message.role !== "user" || firstUserSeen) {
+						return message;
+					}
+					firstUserSeen = true;
+					return appendBudgetToUser(message, snapshot);
+				}),
+				runtime.budget.config.elideToolResponsesAfterTurns,
+			).map((message) => appendBudgetToToolResult(message, snapshot));
+			const latest = messages.at(-1);
+			if (snapshot.fullyExhausted && (!latest || !messageContains(latest, BATS_WRAP_UP_INSTRUCTION))) {
+				messages.push({
+					role: "user",
+					content: `${BATS_WRAP_UP_INSTRUCTION}${formatBudgetBlock(snapshot)}`,
+					timestamp: Date.now(),
+				});
+			}
+		}
+		const provider = latestProvider(runtime);
 		if (provider) {
 			provider.startedAt = performance.now();
-			provider.payloadDigest = digestValue(event.messages);
+			provider.payloadDigest = digestValue(messages);
 			provider.provider = ctx.model?.provider ?? provider.provider;
 			provider.model = ctx.model?.id ?? provider.model;
+		}
+		return messages === event.messages ? undefined : { messages };
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		const runtime = runtimeFor(ctx);
+		const budget = runtime.budget;
+		if (!budget) {
+			return undefined;
+		}
+		if (event.message.role === "user" && !runtime.initialBudgetInjected) {
+			runtime.initialBudgetInjected = true;
+			const message = appendBudgetToUser(event.message, budget.snapshot());
+			return message === event.message ? undefined : { message };
+		}
+		if (event.message.role === "assistant") {
+			const update = budget.addUsage(event.message.usage);
+			persistBudget(runtime, ctx, "provider_usage", {
+				regimeChanged: update.regimeChanged,
+				previousRegime: update.before.regime,
+			});
+			return undefined;
+		}
+		if (event.message.role === "toolResult") {
+			const message = appendBudgetToToolResult(event.message, budget.snapshot());
+			return message === event.message ? undefined : { message };
 		}
 		return undefined;
 	});
@@ -415,6 +596,36 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			...(assistantErrorClass(event.message) ? { errorClass: assistantErrorClass(event.message) } : {}),
 			data: { toolResults: event.toolResults.length, role: event.message.role },
 		});
+		if (runtime.budget) {
+			if (runtime.allowedToolCallsThisTurn > 0) {
+				runtime.noToolCount = 0;
+			} else if (assistantStalled(event.message)) {
+				runtime.noToolCount++;
+			} else {
+				runtime.noToolCount = 0;
+			}
+			const snapshot = runtime.budget.snapshot();
+			runtime.nudgePending = shouldSendContinuationNudge(
+				runtime.noToolCount,
+				runtime.budget.config.noneAnswerThreshold,
+				runtime.budget.hasUsefulToolBudget(),
+				snapshot.fullyExhausted,
+			);
+		}
+	});
+
+	pi.on("tool_result", (event, ctx) => {
+		const budget = runtimeFor(ctx).budget;
+		if (
+			!budget ||
+			contentText(event.content).includes("<budget>") ||
+			contentText(event.content).includes(BATS_ELISION_MARKER)
+		) {
+			return undefined;
+		}
+		return {
+			content: [...event.content, { type: "text", text: toolBudgetText(budget.snapshot()) }],
+		};
 	});
 
 	pi.on("tool_execution_start", (event, ctx) => {
@@ -460,34 +671,93 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { messages: event.messages.length, abandonedProviders: runtime.providers.size },
 		});
 		runtime.providers.clear();
+		if (runtime.nudgePending && runtime.budget && !ctx.hasPendingMessages()) {
+			runtime.nudgePending = false;
+			pi.sendMessage(
+				{
+					customType: "synth.budget.continue",
+					content: `${BATS_CONTINUATION_NUDGE}${formatBudgetBlock(runtime.budget.snapshot())}`,
+					display: true,
+					details: { noToolCount: runtime.noToolCount },
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		}
 	});
 
 	pi.on("tool_call", (event, ctx) => {
 		const runtime = runtimeFor(ctx);
-		let reason: string | undefined;
+		let controlReason: string | undefined;
 		try {
-			reason = controlPlaneBlockReason(event, ctx.cwd);
+			controlReason = controlPlaneBlockReason(event, ctx.cwd);
 		} catch (error) {
-			reason = `Synth runtime guard could not validate the tool call: ${errorMessage(error)}`;
+			controlReason = `Synth runtime guard could not validate the tool call: ${errorMessage(error)}`;
 		}
-		if (!reason) {
+		if (controlReason) {
+			const pointer = transcript(ctx);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "tool",
+				durationMs: 0,
+				tool: {
+					toolCallId: event.toolCallId,
+					name: event.toolName,
+					argsDigest: digestValue(event.input),
+					isError: true,
+				},
+				...(pointer ? { transcript: pointer } : {}),
+				errorClass: "ControlPlaneWriteBlocked",
+				data: { denied: true },
+			});
+			return { block: true, reason: controlReason };
+		}
+		if (!runtime.budget) {
+			runtime.allowedToolCallsThisTurn++;
 			return undefined;
 		}
-		const pointer = transcript(ctx);
-		appendTelemetry(runtime, ctx, {
-			sessionId: ctx.sessionManager.getSessionId(),
-			kind: "tool",
-			durationMs: 0,
-			tool: {
+		try {
+			const reservation = runtime.budget.reserve(event);
+			if (reservation.allowed) {
+				runtime.allowedToolCallsThisTurn++;
+				if (reservation.charges.length > 0) {
+					persistBudget(runtime, ctx, "tool_reserved", {
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						charges: reservation.charges,
+						regimeChanged: reservation.regimeChanged,
+						previousRegime: reservation.before.regime,
+					});
+				}
+				return undefined;
+			}
+			persistBudget(runtime, ctx, "tool_denied", {
 				toolCallId: event.toolCallId,
-				name: event.toolName,
-				argsDigest: digestValue(event.input),
-				isError: true,
-			},
-			...(pointer ? { transcript: pointer } : {}),
-			errorClass: "ControlPlaneWriteBlocked",
-			data: { denied: true },
-		});
-		return { block: true, reason };
+				toolName: event.toolName,
+				charges: reservation.charges,
+			});
+			const pointer = transcript(ctx);
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "tool",
+				durationMs: 0,
+				tool: {
+					toolCallId: event.toolCallId,
+					name: event.toolName,
+					argsDigest: digestValue(event.input),
+					isError: true,
+				},
+				...(pointer ? { transcript: pointer } : {}),
+				errorClass: "BudgetExceeded",
+				data: { denied: true },
+			});
+			const reason = reservation.after.fullyExhausted
+				? `${reservation.reason ?? "No tool budget left."}\n${BATS_WRAP_UP_INSTRUCTION}`
+				: (reservation.reason ?? "No tool budget left.");
+			return { block: true, reason };
+		} catch (error) {
+			const reason = `Synth budget guard failed closed: ${errorMessage(error)}`;
+			warn(runtime, ctx, "budget-guard", reason);
+			return { block: true, reason };
+		}
 	});
 }

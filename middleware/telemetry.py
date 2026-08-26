@@ -17,6 +17,7 @@ TELEMETRY_KINDS = {
     "provider",
     "agent.end",
     "bridge",
+    "budget",
 }
 
 
@@ -190,6 +191,94 @@ class ProviderExchange:
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetCounter:
+    limit: float
+    used: float
+    remaining: float | None
+    unlimited: bool
+
+    @classmethod
+    def from_mapping(cls, value: object, label: str) -> BudgetCounter:
+        mapping = _mapping(value, label)
+        _keys(
+            mapping,
+            label=label,
+            required={"limit", "used", "remaining", "unlimited"},
+        )
+        remaining_value = mapping["remaining"]
+        remaining = (
+            None
+            if remaining_value is None
+            else _number(remaining_value, f"{label}.remaining")
+        )
+        unlimited = mapping["unlimited"]
+        if not isinstance(unlimited, bool):
+            raise TelemetryValidationError(f"{label}.unlimited must be a boolean")
+        limit = _number(mapping["limit"], f"{label}.limit")
+        if unlimited != (limit == 0):
+            raise TelemetryValidationError(
+                f"{label}.unlimited must match whether limit is zero"
+            )
+        if unlimited != (remaining is None):
+            raise TelemetryValidationError(
+                f"{label}.remaining must be null exactly when unlimited"
+            )
+        return cls(
+            limit=limit,
+            used=_number(mapping["used"], f"{label}.used"),
+            remaining=remaining,
+            unlimited=unlimited,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetSnapshot:
+    bash: BudgetCounter
+    edit: BudgetCounter
+    ipython: BudgetCounter
+    subagents: BudgetCounter
+    tokens: BudgetCounter
+    cost_usd: BudgetCounter
+    regime: str
+    fully_exhausted: bool
+
+    @classmethod
+    def from_mapping(cls, value: object) -> BudgetSnapshot:
+        mapping = _mapping(value, "budget")
+        counter_names = {
+            "bash",
+            "edit",
+            "ipython",
+            "subagents",
+            "tokens",
+            "costUsd",
+        }
+        _keys(
+            mapping,
+            label="budget",
+            required=counter_names | {"regime", "fullyExhausted"},
+        )
+        regime = _string(mapping["regime"], "budget.regime")
+        if regime not in {"HIGH", "MEDIUM", "LOW", "CRITICAL"}:
+            raise TelemetryValidationError(f"unknown budget regime: {regime}")
+        fully_exhausted = mapping["fullyExhausted"]
+        if not isinstance(fully_exhausted, bool):
+            raise TelemetryValidationError("budget.fullyExhausted must be a boolean")
+        return cls(
+            bash=BudgetCounter.from_mapping(mapping["bash"], "budget.bash"),
+            edit=BudgetCounter.from_mapping(mapping["edit"], "budget.edit"),
+            ipython=BudgetCounter.from_mapping(mapping["ipython"], "budget.ipython"),
+            subagents=BudgetCounter.from_mapping(
+                mapping["subagents"], "budget.subagents"
+            ),
+            tokens=BudgetCounter.from_mapping(mapping["tokens"], "budget.tokens"),
+            cost_usd=BudgetCounter.from_mapping(mapping["costUsd"], "budget.costUsd"),
+            regime=regime,
+            fully_exhausted=fully_exhausted,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TelemetryEvent:
     schema_version: int
     event_id: str
@@ -202,6 +291,7 @@ class TelemetryEvent:
     usage: Usage | None
     tool: ToolExchange | None
     provider: ProviderExchange | None
+    budget: BudgetSnapshot | None
     transcript: TranscriptPointer | None
     error_class: str | None
     data: dict[str, object] | None
@@ -223,6 +313,7 @@ class TelemetryEvent:
             "usage",
             "tool",
             "provider",
+            "budget",
             "transcript",
             "errorClass",
             "data",
@@ -274,6 +365,11 @@ class TelemetryEvent:
                 if "provider" in mapping
                 else None
             ),
+            budget=(
+                BudgetSnapshot.from_mapping(mapping["budget"])
+                if "budget" in mapping
+                else None
+            ),
             transcript=(
                 TranscriptPointer.from_mapping(mapping["transcript"])
                 if "transcript" in mapping
@@ -286,6 +382,8 @@ class TelemetryEvent:
             raise TelemetryValidationError("tool event requires tool details")
         if event.kind == "provider" and event.provider is None:
             raise TelemetryValidationError("provider event requires provider details")
+        if event.kind == "budget" and event.budget is None:
+            raise TelemetryValidationError("budget event requires a budget snapshot")
         return event
 
     @classmethod
