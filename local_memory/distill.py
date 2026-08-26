@@ -66,7 +66,11 @@ def build_extraction_prompt(
     return system_prompt, prompt
 
 
-def parse_memory_response(response: str) -> ParsedMemoryResponse:
+def parse_memory_response(
+    response: str, *, max_items: int = MAX_MEMORY_ITEMS
+) -> ParsedMemoryResponse:
+    if max_items <= 0:
+        raise ValueError("max_items must be positive")
     matches = list(_MEMORY_HEADER_RE.finditer(response))
     if not matches:
         return ParsedMemoryResponse(
@@ -74,14 +78,14 @@ def parse_memory_response(response: str) -> ParsedMemoryResponse:
         )
 
     errors: list[str] = []
-    if len(matches) > MAX_MEMORY_ITEMS:
+    if len(matches) > max_items:
         errors.append(
             f"response contains {len(matches)} items; only the first "
-            f"{MAX_MEMORY_ITEMS} were accepted"
+            f"{max_items} were accepted"
         )
 
     parsed: list[ParsedMemory] = []
-    for ordinal, match in enumerate(matches[:MAX_MEMORY_ITEMS], start=1):
+    for ordinal, match in enumerate(matches[:max_items], start=1):
         end = matches[ordinal].start() if ordinal < len(matches) else len(response)
         fields, field_errors = _parse_fields(response[match.end() : end], ordinal)
         errors.extend(field_errors)

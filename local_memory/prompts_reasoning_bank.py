@@ -107,8 +107,8 @@ AUTOEVAL_STATUS_PARSE_CONTRACT = '''Thoughts: <your thoughts and reasoning proce
 Status: "success" or "failure"'''
 
 
-# Source: reasoning-bank | WebArena/prompts/memory_instruction.py:63-90; WebArena/induce_scaling.py:193-196 | commit ed80611 | PORTED (verbatim). Stretch item.
-MATTS_CONTRASTIVE_SCALING_SI = """You are an expert in web navigation. You will be given a user query and multiple trajectories showing how an agent attempted the task.
+# Source: reasoning-bank | WebArena/prompts/memory_instruction.py:63-90; WebArena/induce_scaling.py:193-196 | commit ed80611 | ADAPTED (software-engineering domain nouns only).
+MATTS_CONTRASTIVE_SCALING_SI = """You are an expert in software engineering. You will be given a coding task and multiple trajectories showing how an agent attempted the task.
 Some trajectories may be successful, and others may have failed.
 
 ## Guidelines
@@ -116,13 +116,13 @@ Your goal is to **compare and contrast** these trajectories to identify the most
 Use **self-contrast reasoning**:
   - Identify patterns and strategies that consistently led to success.
   - Identify mistakes or inefficiencies from failed trajectories and formulate preventative strategies.
-  - Prefer strategies that generalize beyond specific pages or exact wording.
+  - Prefer strategies that generalize beyond specific repositories or exact wording.
 
 ## Important notes
   - Think first: Why did some trajectories succeed while others failed?
   - You can extract *at most 5* memory items from all trajectories combined.
   - Do not repeat similar or overlapping items.
-  - Do not mention specific websites, queries, or string contents — focus on generalizable behaviors and reasoning patterns.
+  - Do not mention specific repositories, paths, queries, or string contents — focus on generalizable behaviors and reasoning patterns.
   - Make sure each memory item captures **actionable** and **transferable** insights.
 
 ## Output Format
@@ -134,6 +134,21 @@ Your output must strictly follow the Markdown format shown below:
 ## Description <one sentence summary describing when or when NOT to use the memory item>
 ## Content <1-5 sentences describing the insights learned to avoid such failures and successfully accomplishing similar tasks in the future>
 ```"""
+
+
+# Source: reasoning-bank | WebArena/prompts/memory_instruction.py:132-137 | commit ed80611 | ADAPTED (coding evidence and strict judge output).
+MATTS_SEQUENTIAL_REVERIFY_SI = '''You are an expert in evaluating software-engineering agent trajectories.
+
+Important: Carefully re-examine the previous trajectory, including the reasoning steps, tool actions, repository observations, acceptance evidence, and prior judgment.
+Pay special attention to whether the agent changed the correct target, satisfied every acceptance criterion, and grounded its conclusion in observed test or build evidence.
+If you find inconsistencies, correct the prior judgment. If everything is correct, confirm it.
+
+Return exactly two nonempty lines:
+Thoughts: <your corrected reasoning>
+Status: "success" or "failure"'''
+
+
+MATTS_MAX_MEMORY_ITEMS = 5
 
 
 # Source: reasoning-bank | WebArena/induce_scaling.py:188-189 | commit ed80611 | PORTED (verbatim). Stretch item.

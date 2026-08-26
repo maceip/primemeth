@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 
@@ -17,6 +18,10 @@ def main() -> int:
     args, _ = parser.parse_known_args()
 
     trajectory = int(os.environ["SYNTH_BATCH_TRAJECTORY_INDEX"])
+    delay_seconds = float(os.environ.get("SYNTH_FAKE_DELAY_SECONDS", "0"))
+    if delay_seconds < 0:
+        raise ValueError("SYNTH_FAKE_DELAY_SECONDS cannot be negative")
+    time.sleep(delay_seconds)
     initial_raw = os.environ.get("SYNTH_BATCH_BUDGET_USED_JSON", "{}")
     initial_value: object = json.loads(initial_raw)
     initial = initial_value if isinstance(initial_value, dict) else {}

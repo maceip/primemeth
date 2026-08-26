@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -38,6 +39,12 @@ _JUDGE_SYSTEM_PROMPT = (
 
 class BatchWiringError(RuntimeError):
     """Raised when the product batch path lacks a durable required artifact."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCliSpec:
+    argv: tuple[str, ...]
+    private_daemon_cli: Path | None
 
 
 def _mapping(value: object, label: str) -> dict[str, object]:
@@ -190,9 +197,8 @@ class LocalCandidateJudge:
                     )
                 )
             )
-        prompt = (
-            f"Original task:\n{task}\n\nCandidates:\n\n"
-            + "\n\n".join(rendered_candidates)
+        prompt = f"Original task:\n{task}\n\nCandidates:\n\n" + "\n\n".join(
+            rendered_candidates
         )
         response = configured_model_callable(self._settings)(
             _JUDGE_SYSTEM_PROMPT, prompt
@@ -216,6 +222,32 @@ def default_run_id() -> str:
     return datetime.now(UTC).strftime("bats-%Y%m%dT%H%M%S%fZ")
 
 
+def resolve_agent_cli(target: Path, fixture_cli: Path | None) -> AgentCliSpec:
+    if fixture_cli is not None:
+        resolved_fixture_cli = fixture_cli.expanduser().resolve(strict=True)
+        return AgentCliSpec(
+            argv=(sys.executable, str(resolved_fixture_cli)),
+            private_daemon_cli=None,
+        )
+
+    node = shutil.which("node")
+    if node is None:
+        raise BatchWiringError("node is required for Synth batch runs")
+    cli_path = (
+        Path(__file__).resolve().parents[1]
+        / "packages"
+        / "coding-agent"
+        / "dist"
+        / "cli.js"
+    )
+    if not cli_path.is_file():
+        raise BatchWiringError(f"Prime Agent CLI is not built: {cli_path}")
+    extension = target / ".prime" / "agent" / "extensions" / "synth" / "index.ts"
+    if not extension.is_file():
+        raise BatchWiringError(f"target repository has no Synth extension: {extension}")
+    return AgentCliSpec(argv=(node, str(cli_path)), private_daemon_cli=cli_path)
+
+
 def run_bats(
     *,
     workspace: Path,
@@ -234,31 +266,7 @@ def run_bats(
     if settings.verifier.max_cycles == 0:
         raise BatchWiringError("verifier.maxCycles must be positive for --bats")
 
-    private_daemon_cli: Path | None = None
-    if fixture_cli is not None:
-        resolved_fixture_cli = fixture_cli.expanduser().resolve(strict=True)
-        cli_argv = (sys.executable, str(resolved_fixture_cli))
-    else:
-        node = shutil.which("node")
-        if node is None:
-            raise BatchWiringError("node is required for Synth batch runs")
-        private_daemon_cli = (
-            Path(__file__).resolve().parents[1]
-            / "packages"
-            / "coding-agent"
-            / "dist"
-            / "cli.js"
-        )
-        if not private_daemon_cli.is_file():
-            raise BatchWiringError(
-                f"Prime Agent CLI is not built: {private_daemon_cli}"
-            )
-        extension = target / ".prime" / "agent" / "extensions" / "synth" / "index.ts"
-        if not extension.is_file():
-            raise BatchWiringError(
-                f"target repository has no Synth extension: {extension}"
-            )
-        cli_argv = (node, str(private_daemon_cli))
+    agent_cli = resolve_agent_cli(target, fixture_cli)
 
     run_result = run_batch(
         BatchTaskSpec(
@@ -268,12 +276,12 @@ def run_bats(
             base_ref=base_ref,
         ),
         BatchDriverConfig(
-            cli_argv=cli_argv,
+            cli_argv=agent_cli.argv,
             run_id=run_id,
             timeout_seconds=timeout_seconds,
             continue_generation=settings.verifier.continue_generation,
             min_budget_fraction=settings.verifier.min_budget_fraction,
-            private_daemon_cli=private_daemon_cli,
+            private_daemon_cli=agent_cli.private_daemon_cli,
         ),
         PersistedSessionVerifier(),
     )

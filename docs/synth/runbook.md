@@ -147,6 +147,18 @@ uv run --project . --no-sync synth distill \
 
 Retrieved strategies appear under `## Lessons from past sessions`. Contrastive meta-heuristics appear separately under `## Problem framing`. ReasoningBank does not write into native HarnessState.
 
+Run memory-aware test-time scaling against the configured local or explicitly opted-in live endpoint:
+
+```bash
+UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" \
+SYNTH_FASTEMBED_CACHE_DIR="$(pwd)/.synth/models/fastembed" \
+uv run --project . --no-sync synth matts \
+  --task "Fix the defect and verify every acceptance criterion" \
+  -k 3 --target .
+```
+
+MaTTS snapshots the current memory bank, launches `k` isolated Prime Agent trajectories concurrently through the batch driver, sequentially re-verifies each complete trajectory, and contrast-distills their initial and corrected reasoning into at most five strategies. Automatic per-session distillation is suppressed during the batch so every trajectory receives the same input bank. Durable prompts, responses, judgments, source run paths, and memory actions live under `.synth/matts/<run-id>/`. Run `uv run --project . --no-sync python scripts/synth-matts-demo.py` for the no-endpoint faux proof.
+
 ## 6. Operate BATS budgets and verification
 
 Positive budget values are hard ceilings. Zero means unlimited. The transcript receives the exact `<budget>` block at the initial task and after every tool result, plus the current HIGH, MEDIUM, LOW, or CRITICAL regime. Native usage provides tokens, cache use, and cost.

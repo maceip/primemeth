@@ -6,6 +6,7 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -13,6 +14,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from local_memory.prompts_reasoning_bank import (
     AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT,
+    MATTS_CONTRASTIVE_SCALING_SI,
+    MATTS_SEQUENTIAL_REVERIFY_SI,
     META_HEURISTIC_CONTRAST_SI,
 )
 from synth.config import EndpointApi, SynthSettings
@@ -186,30 +189,62 @@ def fixture_model_callable(path: Path) -> Callable[[str, str], str]:
         raw: object = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ModelCallError(f"cannot read memory fixture {path}: {error}") from error
-    if not isinstance(raw, dict) or set(raw) not in (
-        {"judge", "distill"},
-        {"judge", "distill", "meta"},
-    ):
-        raise ModelCallError(
-            "memory fixture must contain judge and distill, with optional meta"
-        )
+    if not isinstance(raw, dict):
+        raise ModelCallError("memory fixture must be a JSON object")
     values = cast(dict[str, object], raw)
-    judge = values["judge"]
-    distill = values["distill"]
-    meta = values.get("meta", distill)
-    if not isinstance(judge, str) or not judge.strip():
-        raise ModelCallError("memory fixture judge must be a nonempty string")
-    if not isinstance(distill, str) or not distill.strip():
-        raise ModelCallError("memory fixture distill must be a nonempty string")
-    if not isinstance(meta, str) or not meta.strip():
-        raise ModelCallError("memory fixture meta must be a nonempty string")
+    allowed = {"judge", "distill", "meta", "parallel", "reverify"}
+    if not {"judge", "distill"}.issubset(values) or not set(values).issubset(allowed):
+        raise ModelCallError(
+            "memory fixture must contain judge and distill, with optional meta, "
+            "parallel, and reverify"
+        )
+    responses: dict[str, tuple[str, ...]] = {}
+    repeating: set[str] = set()
+    for key, value in values.items():
+        if isinstance(value, str):
+            if not value.strip():
+                raise ModelCallError(f"memory fixture {key} must be a nonempty string")
+            responses[key] = (value,)
+            repeating.add(key)
+            continue
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(item, str) and item.strip() for item in value)
+        ):
+            raise ModelCallError(
+                f"memory fixture {key} must be a nonempty string or string array"
+            )
+        responses[key] = tuple(cast(list[str], value))
+    positions: dict[str, int] = {}
+    position_lock = Lock()
+
+    def next_response(key: str) -> str:
+        selected_key = key
+        if selected_key not in responses:
+            selected_key = "judge" if key == "reverify" else "distill"
+        sequence = responses[selected_key]
+        if selected_key in repeating:
+            return sequence[0]
+        with position_lock:
+            position = positions.get(selected_key, 0)
+            if position >= len(sequence):
+                raise ModelCallError(
+                    f"memory fixture {selected_key} response sequence is exhausted"
+                )
+            positions[selected_key] = position + 1
+        return sequence[position]
 
     def call(system_prompt: str, _prompt: str) -> str:
         if system_prompt == AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT:
-            return judge
+            return next_response("judge")
+        if system_prompt == MATTS_SEQUENTIAL_REVERIFY_SI:
+            return next_response("reverify")
+        if system_prompt == MATTS_CONTRASTIVE_SCALING_SI:
+            return next_response("parallel")
         if system_prompt == META_HEURISTIC_CONTRAST_SI:
-            return meta
-        return distill
+            return next_response("meta")
+        return next_response("distill")
 
     return call
 

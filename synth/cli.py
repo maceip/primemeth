@@ -33,6 +33,7 @@ from synth.effectiveness import (
     EndpointSpec,
     run_effectiveness_evaluation,
 )
+from synth.matts import MattsError, default_matts_run_id, run_matts
 from synth.model import ModelCallError, fixture_path_from_environment
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
@@ -94,6 +95,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--endpoint-model", default="local-small")
     evaluate.add_argument("--endpoint-api-key-env", default="SYNTH_LOCAL_API_KEY")
+
+    matts = commands.add_parser(
+        "matts", help="run memory-aware parallel and sequential scaling"
+    )
+    matts.add_argument("--task", required=True, help="task text or a task-spec path")
+    matts.add_argument("-k", type=int, required=True, help="parallel trajectories")
+    matts.add_argument("--target", type=Path, default=Path.cwd())
+    matts.add_argument("--base-ref", default="HEAD")
+    matts.add_argument("--run-id")
+    matts.add_argument("--timeout-seconds", type=float, default=900.0)
+    matts.add_argument("--fixture-cli", type=Path, help=argparse.SUPPRESS)
+    matts.add_argument("--model-fixture", type=Path, help=argparse.SUPPRESS)
 
     memory = commands.add_parser("memory", help="inspect ReasoningBank memory")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
@@ -238,6 +251,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write_json(evaluation)
             return 0 if evaluation.get("complete") is True else 1
+        if command == "matts":
+            target = cast(Path, args.target).expanduser().resolve()
+            task = resolve_task(cast(str, args.task), target)
+            configured_run_id = cast(str | None, args.run_id)
+            _write_json(
+                run_matts(
+                    workspace=target,
+                    task=task,
+                    k=cast(int, args.k),
+                    base_ref=cast(str, args.base_ref),
+                    run_id=configured_run_id or default_matts_run_id(),
+                    timeout_seconds=cast(float, args.timeout_seconds),
+                    fixture_cli=cast(Path | None, args.fixture_cli),
+                    model_fixture=cast(Path | None, args.model_fixture),
+                )
+            )
+            return 0
         if command == "telemetry":
             telemetry_command = cast(str, args.telemetry_command)
             if telemetry_command != "validate":
@@ -337,6 +367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         EmbeddingUnavailableError,
         BatchWiringError,
         EffectivenessError,
+        MattsError,
         MemoryStoreError,
         ModelCallError,
         OSError,
