@@ -365,3 +365,10 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Delete all optimizer evidence before every `npm run check`; force every fixture repository to inherit the outer Biome root; require developers to run checks only before using Synth.
 - Why: A real optimizer run stores fixture workspaces containing their own `biome.json` below ignored `.synth/`. Biome discovers those nested roots before applying the source include set and rejects the command, making valid runtime receipts poison later source validation. Excluding the already-ignored data plane aligns the checker with Git and Law 5 while preserving durable optimizer evidence.
 - Affected files: `biome.json`, optimizer and demo gate behavior.
+
+## 2026-08-26 — D-0053: Carry the prepared overlay environment into candidate child processes
+
+- Decision: Candidate verification exports the current uv-managed environment root as `UV_PROJECT_ENVIRONMENT` in addition to using its Python interpreter and source `tsx`. Extension-launched `uv run --project <candidate> --no-sync` bridge and compiler processes therefore use the setup-qualified dependencies and console entries while keeping the candidate as cwd, configuration root, TypeScript source, test root, and policy target.
+- Alternatives: Synchronize a new overlay venv in every candidate worktree; copy or symlink `.venv` into candidates; disable bridge-bearing regressions during optimization; allow `uv --no-sync` to fall back to an empty or host environment.
+- Why: The first exact-commit finale reached AutoSaddler but correctly rejected its candidate because the Phase 2 regression's bridge exited with code 2 before `ping`: an isolated Git worktree has no `.venv`, and runtime correctly forbids dependency synchronization. The prepared overlay is immutable verification tooling, candidate optimizer changes cannot modify overlay Python code, and an explicit environment handoff preserves no-sync behavior without weakening candidate source or path enforcement.
+- Affected files: `optimizer/synth_harness.py`, candidate verification in `scripts/synth-demo.sh`.

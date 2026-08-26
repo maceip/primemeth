@@ -122,6 +122,7 @@ class SynthHarnessVerifier:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["SYNTH_TEST_TSX"] = str(self.tsx_path)
+        environment["UV_PROJECT_ENVIRONMENT"] = sys.prefix
         for label, *command in commands:
             result = subprocess.run(
                 command,
