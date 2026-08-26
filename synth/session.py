@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import cast
 
@@ -16,6 +17,8 @@ _BUDGET_STATUS_RE = re.compile(r"\n?\[Budget:.*?\| Regime: [A-Z]+\]\n?")
 _STABLE_INTERVAL_SECONDS = 0.05
 _STABLE_OBSERVATIONS = 3
 _STABLE_TIMEOUT_SECONDS = 2.0
+_LESSONS_HEADING = "## Lessons from past sessions"
+_PROBLEM_FRAMING_HEADING = "## Problem framing"
 
 
 class SessionParseError(ValueError):
@@ -33,6 +36,7 @@ class SessionTrajectory:
     response: str | None
     task_state: str | None
     message_count: int
+    retrieved_memory_ids: tuple[int, ...] = ()
 
 
 def wait_for_stable_session(path: Path) -> None:
@@ -163,6 +167,57 @@ def _render_message(
     return role, f"{label}:\n{normalized}"
 
 
+def _retrieved_strategy_ids(entry: dict[str, object]) -> tuple[int, ...] | None:
+    if entry.get("type") != "custom" or entry.get("customType") != (
+        "synth.memory.retrieval"
+    ):
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return None
+    task_query = data.get("taskQuery")
+    timestamp = data.get("timestamp")
+    section = data.get("section")
+    framing_section = data.get("framingSection")
+    item_ids = data.get("itemIds")
+    framing_item_ids = data.get("framingItemIds", [])
+    if (
+        not isinstance(task_query, str)
+        or not task_query
+        or not isinstance(timestamp, (int, float))
+        or isinstance(timestamp, bool)
+        or not isfinite(float(timestamp))
+        or not isinstance(item_ids, list)
+        or not isinstance(framing_item_ids, list)
+    ):
+        return None
+    if not all(
+        isinstance(memory_id, int)
+        and not isinstance(memory_id, bool)
+        and memory_id > 0
+        for memory_id in item_ids
+    ) or not all(
+        isinstance(memory_id, int)
+        and not isinstance(memory_id, bool)
+        and memory_id > 0
+        for memory_id in framing_item_ids
+    ):
+        return None
+    valid_section = (
+        isinstance(section, str) and section.startswith(_LESSONS_HEADING)
+    )
+    valid_framing = isinstance(framing_section, str) and framing_section.startswith(
+        _PROBLEM_FRAMING_HEADING
+    )
+    if (
+        valid_section != bool(item_ids)
+        or valid_framing != bool(framing_item_ids)
+        or (not valid_section and not valid_framing)
+    ):
+        return None
+    return tuple(dict.fromkeys(cast(list[int], item_ids)))
+
+
 def load_session_trajectory(
     path: Path,
     *,
@@ -207,6 +262,7 @@ def load_session_trajectory(
     session_state = "unknown"
     trajectory_parts: list[str] = []
     message_count = 0
+    retrieved_memory_ids: tuple[int, ...] = ()
     for entry in branch:
         entry_type = entry.get("type")
         if entry_type == "message":
@@ -238,6 +294,10 @@ def load_session_trajectory(
             state = entry.get("state")
             if isinstance(state, dict) and isinstance(state.get("status"), str):
                 session_state = cast(str, state["status"])
+        else:
+            candidate_ids = _retrieved_strategy_ids(entry)
+            if candidate_ids is not None:
+                retrieved_memory_ids = candidate_ids
     if not task_query:
         raise SessionParseError("active session branch has no user task")
     if not trajectory_parts:
@@ -252,4 +312,5 @@ def load_session_trajectory(
         response=response,
         task_state=task_state,
         message_count=message_count,
+        retrieved_memory_ids=retrieved_memory_ids,
     )

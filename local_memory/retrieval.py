@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from local_memory.prompts_reasoning_bank import INSTRUCTION_AWARE_QUERY_FORMAT
-from local_memory.store import MemoryItem, MemoryStatus, MemoryStore
+from local_memory.store import (
+    MINIMUM_MEMORY_CONFIDENCE,
+    MemoryItem,
+    MemoryStatus,
+    MemoryStore,
+)
 
 DEFAULT_TOP_K = 3
 DEFAULT_MIN_SCORE = 0.0
@@ -73,8 +78,11 @@ class MemoryRetriever:
         _validate_retrieval_options(selected_top_k, selected_min_score)
         detailed_query = get_detailed_instruct(self.task_description, query)
         query_vector = self.store.embed_texts([detailed_query])[0]
-        matches = self.store.search_vector(query_vector, top_k=selected_top_k)
-        return [
+        stored_count = self.store.count()
+        if stored_count == 0:
+            return []
+        matches = self.store.search_vector(query_vector, top_k=stored_count)
+        eligible = [
             RetrievedMemory(
                 item=match.item,
                 score=match.similarity,
@@ -88,6 +96,14 @@ class MemoryRetriever:
             for match in matches
             if match.similarity >= selected_min_score
         ]
+        eligible.sort(
+            key=lambda result: (
+                -result.score,
+                -max(result.item.confidence, MINIMUM_MEMORY_CONFIDENCE),
+                result.item.id,
+            )
+        )
+        return eligible[:selected_top_k]
 
 
 def _validate_retrieval_options(top_k: int, min_score: float) -> None:

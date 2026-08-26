@@ -16,7 +16,12 @@ from local_memory.prompts_reasoning_bank import (
     META_HEURISTIC_CONTRAST_SI,
 )
 from local_memory.retrieval import MemoryRetriever
-from local_memory.store import MemoryStore, NewMemory
+from local_memory.store import (
+    MemoryFeedbackOutcome,
+    MemoryFeedbackSource,
+    MemoryStore,
+    NewMemory,
+)
 from middleware.telemetry import load_terminal_outcome
 from middleware.terminal_outcome import TerminalOutcome
 from synth.config import SynthSettings, load_synth_settings
@@ -59,6 +64,20 @@ class MetaHeuristicResult:
     outcomes: tuple[DedupResult, ...]
     parse_errors: tuple[str, ...]
     successful_memory_id: int | None
+
+
+def _feedback_outcome(
+    judged: JudgedSession,
+) -> tuple[MemoryFeedbackOutcome, MemoryFeedbackSource]:
+    if (
+        judged.terminal_outcome is not None
+        and judged.terminal_outcome.reward is not None
+    ):
+        return (
+            "success" if judged.terminal_outcome.reward == 1 else "failure",
+            "terminal",
+        )
+    return judged.result.verdict, "judge"
 
 
 def _contrast_meta_heuristic(
@@ -199,6 +218,13 @@ def distill_session(
         embedder=embedder,
         workspace=settings.workspace,
     ) as store:
+        feedback_outcome, feedback_source = _feedback_outcome(judged)
+        feedback = store.record_feedback(
+            session_id=judged.trajectory.session_id,
+            memory_ids=judged.trajectory.retrieved_memory_ids,
+            outcome=feedback_outcome,
+            source=feedback_source,
+        )
         deduplicator = MemoryDeduplicator(store)
         result = MemoryDistiller(
             model_call,
@@ -244,6 +270,14 @@ def distill_session(
         ],
         "metaHeuristicParseErrors": list(meta_result.parse_errors),
         "contrastedSuccessfulMemoryId": meta_result.successful_memory_id,
+        "memoryFeedback": {
+            "outcome": feedback.outcome,
+            "source": feedback.source,
+            "updatedItemIds": list(feedback.updated_item_ids),
+            "unchangedItemIds": list(feedback.unchanged_item_ids),
+            "missingItemIds": list(feedback.missing_item_ids),
+            "ineligibleItemIds": list(feedback.ineligible_item_ids),
+        },
     }
 
 

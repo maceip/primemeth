@@ -24,12 +24,30 @@ from local_memory.embedder import (
 
 MemoryStatus = Literal["success", "fail"]
 MemoryItemType = Literal["strategy", "meta_heuristic"]
+MemoryFeedbackOutcome = Literal["success", "failure"]
+MemoryFeedbackSource = Literal["terminal", "judge"]
 
 DEFAULT_DATABASE_PATH = Path(".synth/synth.db")
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
+DEFAULT_MEMORY_CONFIDENCE = 0.5
+MINIMUM_MEMORY_CONFIDENCE = 0.25
 _SCHEMA_DEFAULT_VECTOR = f"FLOAT[{DEFAULT_EMBED_DIMENSION}]"
 _VALID_STATUSES = frozenset({"success", "fail"})
 _VALID_ITEM_TYPES = frozenset({"strategy", "meta_heuristic"})
+_VALID_FEEDBACK_OUTCOMES = frozenset({"success", "failure"})
+_VALID_FEEDBACK_SOURCES = frozenset({"terminal", "judge"})
+_REINFORCEMENT_COLUMNS = {
+    "success_count": (
+        "INTEGER NOT NULL DEFAULT 0 CHECK (success_count >= 0)"
+    ),
+    "failure_count": (
+        "INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0)"
+    ),
+    "confidence": (
+        "REAL NOT NULL DEFAULT 0.5 "
+        "CHECK (confidence >= 0.25 AND confidence <= 1.0)"
+    ),
+}
 
 
 class Embedder(Protocol):
@@ -73,6 +91,9 @@ class MemoryItem:
     task_query: str
     session_id: str
     template_key: str | None
+    success_count: int
+    failure_count: int
+    confidence: float
     created_at: str
 
 
@@ -80,6 +101,16 @@ class MemoryItem:
 class VectorMatch:
     item: MemoryItem
     similarity: float
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryFeedbackResult:
+    outcome: MemoryFeedbackOutcome
+    source: MemoryFeedbackSource
+    updated_item_ids: tuple[int, ...]
+    unchanged_item_ids: tuple[int, ...]
+    missing_item_ids: tuple[int, ...]
+    ineligible_item_ids: tuple[int, ...]
 
 
 def memory_embedding_text(memory: NewMemory | MemoryItem) -> str:
@@ -170,7 +201,18 @@ class MemoryStore:
             _SCHEMA_DEFAULT_VECTOR, f"FLOAT[{self.embedding_dimension}]"
         )
         self._connection.executescript(rendered)
+        self._migrate_reinforcement_columns()
         self._validate_existing_dimension()
+
+    def _migrate_reinforcement_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(memory_items)").fetchall()
+        columns = {str(row["name"]) for row in rows}
+        with self._connection:
+            for name, declaration in _REINFORCEMENT_COLUMNS.items():
+                if name not in columns:
+                    self._connection.execute(
+                        f"ALTER TABLE memory_items ADD COLUMN {name} {declaration}"
+                    )
 
     def _validate_existing_dimension(self) -> None:
         row = self._connection.execute(
@@ -267,6 +309,131 @@ class MemoryStore:
             parameters = (limit,)
         rows = self._connection.execute(sql, parameters).fetchall()
         return [_row_to_item(row) for row in rows]
+
+    def count(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) FROM memory_items").fetchone()
+        if row is None:
+            raise MemoryStoreError("SQLite did not return the memory item count")
+        return int(row[0])
+
+    def record_feedback(
+        self,
+        *,
+        session_id: str,
+        memory_ids: Sequence[int],
+        outcome: MemoryFeedbackOutcome,
+        source: MemoryFeedbackSource,
+    ) -> MemoryFeedbackResult:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("feedback session_id cannot be empty")
+        if outcome not in _VALID_FEEDBACK_OUTCOMES:
+            raise ValueError(f"invalid memory feedback outcome: {outcome}")
+        if source not in _VALID_FEEDBACK_SOURCES:
+            raise ValueError(f"invalid memory feedback source: {source}")
+        normalized_ids: list[int] = []
+        for memory_id in memory_ids:
+            if isinstance(memory_id, bool) or memory_id <= 0:
+                raise ValueError("feedback memory IDs must be positive integers")
+            if memory_id not in normalized_ids:
+                normalized_ids.append(memory_id)
+
+        updated: list[int] = []
+        unchanged: list[int] = []
+        missing: list[int] = []
+        ineligible: list[int] = []
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            for memory_id in normalized_ids:
+                item_row = self._connection.execute(
+                    """
+                    SELECT item_type, success_count, failure_count
+                    FROM memory_items
+                    WHERE id = ?
+                    """,
+                    (memory_id,),
+                ).fetchone()
+                if item_row is None:
+                    missing.append(memory_id)
+                    continue
+                if item_row["item_type"] != "strategy":
+                    ineligible.append(memory_id)
+                    continue
+                prior = self._connection.execute(
+                    """
+                    SELECT outcome, source
+                    FROM memory_feedback
+                    WHERE session_id = ? AND memory_id = ?
+                    """,
+                    (normalized_session_id, memory_id),
+                ).fetchone()
+                if prior is not None and (
+                    prior["source"] == "terminal"
+                    or (
+                        prior["source"] == source
+                        and prior["outcome"] != outcome
+                    )
+                ):
+                    unchanged.append(memory_id)
+                    continue
+                if prior is not None and prior["outcome"] == outcome:
+                    if source == "terminal" and prior["source"] != "terminal":
+                        self._connection.execute(
+                            """
+                            UPDATE memory_feedback
+                            SET source = ?
+                            WHERE session_id = ? AND memory_id = ?
+                            """,
+                            (source, normalized_session_id, memory_id),
+                        )
+                    unchanged.append(memory_id)
+                    continue
+
+                success_count = int(item_row["success_count"])
+                failure_count = int(item_row["failure_count"])
+                if prior is not None:
+                    if prior["outcome"] == "success":
+                        success_count -= 1
+                    else:
+                        failure_count -= 1
+                if outcome == "success":
+                    success_count += 1
+                else:
+                    failure_count += 1
+                if success_count < 0 or failure_count < 0:
+                    raise MemoryStoreError(
+                        "memory feedback ledger disagrees with "
+                        f"item {memory_id} counters"
+                    )
+                confidence = memory_confidence(success_count, failure_count)
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_feedback (
+                        session_id, memory_id, outcome, source
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id, memory_id) DO UPDATE SET
+                        outcome = excluded.outcome,
+                        source = excluded.source
+                    """,
+                    (normalized_session_id, memory_id, outcome, source),
+                )
+                self._connection.execute(
+                    """
+                    UPDATE memory_items
+                    SET success_count = ?, failure_count = ?, confidence = ?
+                    WHERE id = ?
+                    """,
+                    (success_count, failure_count, confidence, memory_id),
+                )
+                updated.append(memory_id)
+        return MemoryFeedbackResult(
+            outcome=outcome,
+            source=source,
+            updated_item_ids=tuple(updated),
+            unchanged_item_ids=tuple(unchanged),
+            missing_item_ids=tuple(missing),
+            ineligible_item_ids=tuple(ineligible),
+        )
 
     def delete(self, memory_id: int) -> bool:
         with self._connection:
@@ -378,6 +545,13 @@ def _validated_memory(memory: NewMemory) -> NewMemory:
     )
 
 
+def memory_confidence(success_count: int, failure_count: int) -> float:
+    if success_count < 0 or failure_count < 0:
+        raise ValueError("memory feedback counts cannot be negative")
+    smoothed = (success_count + 1) / (success_count + failure_count + 2)
+    return max(MINIMUM_MEMORY_CONFIDENCE, smoothed)
+
+
 def _row_to_item(row: sqlite3.Row) -> MemoryItem:
     return MemoryItem(
         id=int(row["id"]),
@@ -389,5 +563,8 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
         task_query=str(row["task_query"]),
         session_id=str(row["session_id"]),
         template_key=(str(row["template_key"]) if row["template_key"] else None),
+        success_count=int(row["success_count"]),
+        failure_count=int(row["failure_count"]),
+        confidence=float(row["confidence"]),
         created_at=str(row["created_at"]),
     )

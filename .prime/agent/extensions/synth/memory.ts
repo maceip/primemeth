@@ -18,6 +18,9 @@ export interface MemoryItem {
 	taskQuery: string;
 	sessionId: string;
 	templateKey: string | null;
+	successCount: number;
+	failureCount: number;
+	confidence: number;
 	createdAt: string;
 	score?: number;
 }
@@ -58,6 +61,20 @@ function parseItem(value: unknown, scoreRequired: boolean): MemoryItem {
 	if (value.templateKey !== null && typeof value.templateKey !== "string") {
 		throw new Error("memory response item.templateKey must be a string or null");
 	}
+	if (!Number.isSafeInteger(value.successCount) || Number(value.successCount) < 0) {
+		throw new Error("memory response item.successCount must be a nonnegative integer");
+	}
+	if (!Number.isSafeInteger(value.failureCount) || Number(value.failureCount) < 0) {
+		throw new Error("memory response item.failureCount must be a nonnegative integer");
+	}
+	if (
+		typeof value.confidence !== "number" ||
+		!Number.isFinite(value.confidence) ||
+		value.confidence < 0.25 ||
+		value.confidence > 1
+	) {
+		throw new Error("memory response item.confidence must be between 0.25 and 1");
+	}
 	if (
 		value.score !== undefined &&
 		(typeof value.score !== "number" || !Number.isFinite(value.score) || value.score < -1 || value.score > 1)
@@ -77,6 +94,9 @@ function parseItem(value: unknown, scoreRequired: boolean): MemoryItem {
 		taskQuery: nonemptyString(value.taskQuery, "item.taskQuery"),
 		sessionId: nonemptyString(value.sessionId, "item.sessionId"),
 		templateKey: value.templateKey,
+		successCount: Number(value.successCount),
+		failureCount: Number(value.failureCount),
+		confidence: value.confidence,
 		createdAt: nonemptyString(value.createdAt, "item.createdAt"),
 		...(value.score === undefined ? {} : { score: value.score }),
 	};
@@ -118,7 +138,7 @@ export function renderMemoryList(items: readonly MemoryItem[]): string {
 	return `Synth memory list\n${items
 		.map(
 			(item) =>
-				`#${item.id} [${item.status}/${item.itemType}] ${item.title}\n${item.description}\nSession: ${item.sessionId}`,
+				`#${item.id} [${item.status}/${item.itemType}] ${item.title}\n${item.description}\nConfidence: ${item.confidence.toFixed(3)} (${item.successCount} success / ${item.failureCount} failure)\nSession: ${item.sessionId}`,
 		)
 		.join("\n\n")}`;
 }
@@ -130,7 +150,7 @@ export function renderMemorySearch(query: string, items: readonly MemoryItem[]):
 	return `Synth memory search: ${query}\n${items
 		.map(
 			(item) =>
-				`#${item.id} score=${item.score?.toFixed(3) ?? "n/a"} [${item.status}] ${item.title}\n${item.description}\n${item.content}`,
+				`#${item.id} score=${item.score?.toFixed(3) ?? "n/a"} confidence=${item.confidence.toFixed(3)} [${item.status}] ${item.title}\n${item.description}\n${item.content}`,
 		)
 		.join("\n\n")}`;
 }

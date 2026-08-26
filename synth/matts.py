@@ -30,7 +30,14 @@ from local_memory.prompts_reasoning_bank import (
     MATTS_SCALING_TRAJECTORY_FORMAT,
     MATTS_SEQUENTIAL_REVERIFY_SI,
 )
-from local_memory.store import Embedder, MemoryStatus, MemoryStore, NewMemory
+from local_memory.store import (
+    Embedder,
+    MemoryFeedbackOutcome,
+    MemoryFeedbackSource,
+    MemoryStatus,
+    MemoryStore,
+    NewMemory,
+)
 from middleware.batch_driver import BatchDriverConfig, BatchTaskSpec, run_batch
 from middleware.terminal_outcome import TerminalOutcome
 from synth.batch import PersistedSessionVerifier, resolve_agent_cli
@@ -164,6 +171,17 @@ def run_matts(
         embedder=selected_embedder,
         workspace=target,
     ) as store:
+        feedback_results = []
+        for item in judged:
+            feedback_outcome, feedback_source = _trajectory_feedback_outcome(item)
+            feedback_results.append(
+                store.record_feedback(
+                    session_id=item.trajectory.session_id,
+                    memory_ids=item.trajectory.retrieved_memory_ids,
+                    outcome=feedback_outcome,
+                    source=feedback_source,
+                )
+            )
         deduplicator = MemoryDeduplicator(store)
         outcomes = tuple(
             deduplicator.add(
@@ -212,11 +230,32 @@ def run_matts(
             "itemIds": [outcome.item.id for outcome in outcomes],
             "actions": [outcome.action for outcome in outcomes],
             "templateKey": template_key,
+            "feedback": [
+                {
+                    "sessionId": item.trajectory.session_id,
+                    "outcome": feedback.outcome,
+                    "source": feedback.source,
+                    "updatedItemIds": list(feedback.updated_item_ids),
+                    "unchangedItemIds": list(feedback.unchanged_item_ids),
+                    "missingItemIds": list(feedback.missing_item_ids),
+                    "ineligibleItemIds": list(feedback.ineligible_item_ids),
+                }
+                for item, feedback in zip(judged, feedback_results, strict=True)
+            ],
         },
     }
     report_path = output_root / "report.json"
     _write_json(report_path, report)
     return cast(JsonObject, {**report, "reportPath": str(report_path)})
+
+
+def _trajectory_feedback_outcome(
+    item: ReverifiedTrajectory,
+) -> tuple[MemoryFeedbackOutcome, MemoryFeedbackSource]:
+    reward = item.artifact.terminal_outcome.reward
+    if reward is not None:
+        return ("success" if reward == 1 else "failure"), "terminal"
+    return item.reverified.verdict, "judge"
 
 
 def _run_parallel_trajectories(

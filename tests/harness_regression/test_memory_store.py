@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+from sqlite_vec import serialize_float32
 
 from local_memory.dedup import MemoryDeduplicator
 from local_memory.distill import MemoryDistiller, parse_memory_response
@@ -95,6 +96,84 @@ def test_schema_round_trip_and_vector_cleanup(tmp_path: Path) -> None:
         assert reopened.list() == []
 
 
+def test_existing_database_gets_additive_reinforcement_migration(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database_path)
+    connection.enable_load_extension(True)
+    sqlite_vec.load(connection)
+    connection.enable_load_extension(False)
+    connection.executescript(
+        """
+        CREATE TABLE memory_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            task_query TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            template_key TEXT,
+            created_at TEXT NOT NULL DEFAULT (
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            )
+        );
+        CREATE VIRTUAL TABLE memory_embeddings USING vec0(
+            memory_id INTEGER PRIMARY KEY,
+            embedding FLOAT[3] distance_metric=cosine
+        );
+        """
+    )
+    cursor = connection.execute(
+        """
+        INSERT INTO memory_items (
+            title, description, content, status, item_type,
+            task_query, session_id, template_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy-memory",
+            "Legacy description",
+            "Legacy content",
+            "success",
+            "strategy",
+            "Legacy task",
+            "legacy-session",
+            None,
+        ),
+    )
+    memory_id = cursor.lastrowid
+    assert memory_id is not None
+    connection.execute(
+        "INSERT INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
+        (memory_id, serialize_float32([1.0, 0.0, 0.0])),
+    )
+    connection.commit()
+    connection.close()
+
+    with open_store(database_path) as store:
+        migrated = store.get(memory_id)
+        assert migrated is not None
+        assert migrated.title == "legacy-memory"
+        assert migrated.success_count == 0
+        assert migrated.failure_count == 0
+        assert migrated.confidence == 0.5
+        assert store.search_vector([1.0, 0.0, 0.0], top_k=1)[0].item.id == memory_id
+
+    migrated_connection = sqlite3.connect(database_path)
+    columns = {
+        row[1]
+        for row in migrated_connection.execute("PRAGMA table_info(memory_items)")
+    }
+    assert {"success_count", "failure_count", "confidence"} <= columns
+    assert migrated_connection.execute(
+        "SELECT COUNT(*) FROM memory_feedback"
+    ).fetchone() == (0,)
+    migrated_connection.close()
+
+
 def test_embedding_dedup_threshold_skips_near_and_inserts_far(
     tmp_path: Path,
 ) -> None:
@@ -150,6 +229,94 @@ def test_retrieval_applies_top_k_min_score_and_provenance(tmp_path: Path) -> Non
 
         filtered = retriever.retrieve("query-best", top_k=3, min_score=0.9)
         assert [result.item.title for result in filtered] == ["best-memory"]
+
+
+def test_feedback_is_idempotent_correctable_and_breaks_semantic_ties(
+    tmp_path: Path,
+) -> None:
+    with open_store(tmp_path / "feedback.db") as store:
+        failed = store.insert(
+            new_memory("rank-failed"), embedding=[1.0, 0.0, 0.0]
+        )
+        succeeded = store.insert(
+            new_memory("rank-succeeded"), embedding=[1.0, 0.0, 0.0]
+        )
+        framing = store.insert(
+            new_memory("rank-framing", item_type="meta_heuristic"),
+            embedding=[1.0, 0.0, 0.0],
+        )
+        distant = store.insert(new_memory("axis-y"))
+        for index in range(6):
+            store.record_feedback(
+                session_id=f"distant-success-{index}",
+                memory_ids=[distant.id],
+                outcome="success",
+                source="terminal",
+            )
+        retriever = MemoryRetriever(store, top_k=3, min_score=0.9)
+        assert [result.item.id for result in retriever.retrieve("query-best")][:2] == [
+            failed.id,
+            succeeded.id,
+        ]
+
+        failure = store.record_feedback(
+            session_id="failed-session",
+            memory_ids=[failed.id, failed.id, framing.id, 99_999],
+            outcome="failure",
+            source="judge",
+        )
+        success = store.record_feedback(
+            session_id="succeeded-session",
+            memory_ids=[succeeded.id],
+            outcome="success",
+            source="terminal",
+        )
+        replay = store.record_feedback(
+            session_id="succeeded-session",
+            memory_ids=[succeeded.id],
+            outcome="success",
+            source="terminal",
+        )
+
+        assert failure.updated_item_ids == (failed.id,)
+        assert failure.ineligible_item_ids == (framing.id,)
+        assert failure.missing_item_ids == (99_999,)
+        assert success.updated_item_ids == (succeeded.id,)
+        assert replay.updated_item_ids == ()
+        assert replay.unchanged_item_ids == (succeeded.id,)
+        assert store.get(failed.id).confidence == pytest.approx(1 / 3)
+        assert store.get(succeeded.id).confidence == pytest.approx(2 / 3)
+
+        ranked = retriever.retrieve("query-best")
+        assert [result.item.id for result in ranked][:3] == [
+            succeeded.id,
+            framing.id,
+            failed.id,
+        ]
+        assert distant.id not in [result.item.id for result in ranked]
+
+        corrected = store.record_feedback(
+            session_id="failed-session",
+            memory_ids=[failed.id],
+            outcome="success",
+            source="terminal",
+        )
+        corrected_item = store.get(failed.id)
+        assert corrected.updated_item_ids == (failed.id,)
+        assert corrected_item is not None
+        assert corrected_item.success_count == 1
+        assert corrected_item.failure_count == 0
+        assert corrected_item.confidence == pytest.approx(2 / 3)
+        for index in range(8):
+            store.record_feedback(
+                session_id=f"later-failure-{index}",
+                memory_ids=[failed.id],
+                outcome="failure",
+                source="judge",
+            )
+        floored = store.get(failed.id)
+        assert floored is not None
+        assert floored.confidence == 0.25
 
 
 def test_parser_caps_at_three_and_reports_malformed_items() -> None:

@@ -151,6 +151,9 @@ def _memory_item(item: MemoryItem, *, score: float | None = None) -> JsonObject:
         "taskQuery": item.task_query,
         "sessionId": item.session_id,
         "templateKey": item.template_key,
+        "successCount": item.success_count,
+        "failureCount": item.failure_count,
+        "confidence": item.confidence,
         "createdAt": item.created_at,
         **({"score": score} if score is not None else {}),
     }
@@ -246,7 +249,7 @@ class BridgeService:
             min_score = float(cast(int | float, params["minScore"]))
             statuses = set(cast(list[str], params["statuses"]))
             item_types = set(cast(list[str], params["itemTypes"]))
-            stored_count = len(store.list())
+            stored_count = store.count()
             if stored_count == 0:
                 return {"items": []}
             results = MemoryRetriever(

@@ -17,7 +17,7 @@ from local_memory.observation_redactor import (
 )
 from local_memory.prompts_reasoning_bank import FAILED_SI
 from local_memory.retrieval import MemoryRetriever
-from local_memory.store import MemoryStore
+from local_memory.store import MemoryStore, NewMemory
 
 _DEMO_DIMENSION = 32
 _DEMO_MAX_TRAJECTORY_TOKENS = 8_000
@@ -109,6 +109,75 @@ def main() -> None:
         print(f"retrieved={len(retrieved)}")
         for result in retrieved:
             print(f"{result.marked_title} score={result.score:.3f}")
+
+        tied_embedding = [1.0, *([0.0] * (_DEMO_DIMENSION - 1))]
+        failed_item = store.insert(
+            NewMemory(
+                title="Failure-ranked workflow",
+                description="A semantically tied workflow exposed in a failed session.",
+                content="Inspect the failure boundary before changing implementation.",
+                status="fail",
+                item_type="strategy",
+                task_query="Resolve a tied fixture workflow",
+                session_id="seed-failed",
+            ),
+            embedding=tied_embedding,
+        )
+        succeeded_item = store.insert(
+            NewMemory(
+                title="Success-ranked workflow",
+                description=(
+                    "A semantically tied workflow exposed in a successful session."
+                ),
+                content=(
+                    "Verify the boundary, make the narrow change, and rerun acceptance."
+                ),
+                status="success",
+                item_type="strategy",
+                task_query="Resolve a tied fixture workflow",
+                session_id="seed-succeeded",
+            ),
+            embedding=tied_embedding,
+        )
+        rank_query = "Resolve the tied fixture workflow"
+        before = MemoryRetriever(store, top_k=store.count()).retrieve(rank_query)
+        before_tied = [
+            result.item.id
+            for result in before
+            if result.item.id in {failed_item.id, succeeded_item.id}
+        ]
+        store.record_feedback(
+            session_id="retrieval-failed-session",
+            memory_ids=[failed_item.id],
+            outcome="failure",
+            source="terminal",
+        )
+        store.record_feedback(
+            session_id="retrieval-succeeded-session",
+            memory_ids=[succeeded_item.id],
+            outcome="success",
+            source="terminal",
+        )
+        after = MemoryRetriever(store, top_k=store.count()).retrieve(rank_query)
+        after_tied = [
+            result.item.id
+            for result in after
+            if result.item.id in {failed_item.id, succeeded_item.id}
+        ]
+        if before_tied != [failed_item.id, succeeded_item.id] or after_tied != [
+            succeeded_item.id,
+            failed_item.id,
+        ]:
+            raise RuntimeError("memory confidence did not break the semantic tie")
+        failed_after = store.get(failed_item.id)
+        succeeded_after = store.get(succeeded_item.id)
+        if failed_after is None or succeeded_after is None:
+            raise RuntimeError("reinforcement demo items disappeared")
+        print(
+            "memory_reinforcement=rank_changed "
+            f"failed_confidence={failed_after.confidence:.3f} "
+            f"succeeded_confidence={succeeded_after.confidence:.3f}"
+        )
 
 
 def _embed_text(text: str) -> list[float]:

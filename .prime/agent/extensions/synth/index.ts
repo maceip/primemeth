@@ -1125,6 +1125,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (
 			runtime.distillEnqueued ||
 			process.env.SYNTH_BATCH_READ_ONLY_MEMORY === "1" ||
+			(managedBatchSession(ctx) && !runtime.outcomePersisted) ||
 			reason === "reload" ||
 			!config?.memory.enabled ||
 			config.killSwitch.all ||

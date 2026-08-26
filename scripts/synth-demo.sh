@@ -900,6 +900,12 @@ if ! grep -q 'redacted_log_lines=5000 terminal_exception=preserved' <<<"${memory
 	exit 1
 fi
 printf 'synth-demo: Phase 4 5000-line observation redaction PASS\n'
+if ! grep -q 'memory_reinforcement=rank_changed failed_confidence=0.333 succeeded_confidence=0.667' \
+	<<<"${memory_redaction_output}"; then
+	printf 'synth-demo: Phase 4 memory outcome reinforcement did not change tied ranking\n' >&2
+	exit 1
+fi
+printf 'synth-demo: Phase 4 strategy-memory reinforcement PASS\n'
 
 (
 	cd "${synth_root}"
