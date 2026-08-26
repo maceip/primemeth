@@ -610,3 +610,81 @@ if tmux has-session -t "=${demo_disabled_summary_tui_session}" 2>/dev/null; then
 fi
 demo_disabled_summary_tui_owned=0
 printf 'synth-demo: Phase 1 A2 missing-config no-op PASS\n'
+
+(
+	cd "${synth_root}"
+	/usr/bin/env \
+		-u PI_OFFLINE \
+		-u DO_NOT_TRACK \
+		-u PRIME_AGENT_TELEMETRY \
+		NODE_ENV=production \
+		node --input-type=module --eval '
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { SettingsManager } from "./packages/coding-agent/dist/core/settings-manager.js";
+import { captureAgentCommandUsed, isTelemetryEnabled } from "./packages/coding-agent/dist/core/telemetry.js";
+
+const [projectRoot, agentDir] = process.argv.slice(1);
+const telemetryPath = join(agentDir, "telemetry.json");
+let fetchCalls = 0;
+globalThis.fetch = async () => {
+	fetchCalls++;
+	throw new Error("telemetry demo forbids network requests");
+};
+
+const shippedSettings = SettingsManager.create(projectRoot, agentDir);
+if (isTelemetryEnabled(shippedSettings)) {
+	throw new Error("shipped Synth settings unexpectedly enable product analytics");
+}
+await captureAgentCommandUsed({
+	agentDir,
+	settingsManager: shippedSettings,
+	commandName: "model",
+});
+if (existsSync(telemetryPath)) {
+	throw new Error("disabled product analytics created telemetry.json");
+}
+
+const events = [];
+let flushCount = 0;
+const sink = {
+	capture(name, properties) {
+		events.push({ name, properties });
+	},
+	async flush() {
+		flushCount++;
+	},
+};
+const enabledSettings = SettingsManager.inMemory({ telemetry: { enabled: true } });
+if (!isTelemetryEnabled(enabledSettings)) {
+	throw new Error("explicit settings opt-in did not enable product analytics");
+}
+await captureAgentCommandUsed({
+	agentDir,
+	settingsManager: enabledSettings,
+	commandName: "model",
+	sink,
+});
+if (
+	events.length !== 1 ||
+	events[0]?.name !== "agent command used" ||
+	events[0]?.properties?.command_name !== "model" ||
+	flushCount !== 1
+) {
+	throw new Error("explicit settings opt-in did not reach the injected telemetry sink");
+}
+
+process.env.PRIME_AGENT_TELEMETRY = "1";
+if (!isTelemetryEnabled(SettingsManager.inMemory())) {
+	throw new Error("explicit environment opt-in did not enable product analytics");
+}
+process.env.PI_OFFLINE = "1";
+if (isTelemetryEnabled(enabledSettings)) {
+	throw new Error("PI_OFFLINE did not override explicit analytics opt-in");
+}
+if (fetchCalls !== 0 || existsSync(telemetryPath)) {
+	throw new Error("telemetry demo used the network or wrote product telemetry state");
+}
+' "${synth_root}" "${demo_agent_dir}"
+)
+printf 'synth-demo: Phase 1 A4 analytics opt-in policy PASS\n'

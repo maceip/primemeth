@@ -215,7 +215,10 @@ export function isTelemetryEnabled(settingsManager: SettingsManager): boolean {
 	if (process.env.NODE_ENV === "test") {
 		return false;
 	}
-	return settingsManager.getTelemetryEnabled();
+	const explicitlyEnabled =
+		settingsManager.getGlobalSettings().telemetry?.enabled === true ||
+		settingsManager.getProjectSettings().telemetry?.enabled === true;
+	return explicitlyEnabled && settingsManager.getTelemetryEnabled();
 }
 
 function isInstallationId(value: unknown): value is string {

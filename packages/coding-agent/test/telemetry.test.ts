@@ -233,11 +233,16 @@ describe("telemetry identity and transport", () => {
 });
 
 describe("telemetry controls", () => {
-	it("honors settings and environment opt-outs", () => {
+	it("requires an explicit opt-in and honors absolute opt-outs", () => {
+		const unconfigured = SettingsManager.inMemory();
 		const settings = SettingsManager.inMemory({ telemetry: { enabled: true } });
 
 		vi.stubEnv("NODE_ENV", "production");
+		expect(isTelemetryEnabled(unconfigured)).toBe(false);
 		expect(isTelemetryEnabled(settings)).toBe(true);
+
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		expect(isTelemetryEnabled(unconfigured)).toBe(true);
 
 		vi.stubEnv("DO_NOT_TRACK", "1");
 		expect(isTelemetryEnabled(settings)).toBe(false);

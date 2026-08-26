@@ -66,17 +66,27 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 ### Pseudonymous usage analytics
 
-Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
+When explicitly enabled, Prime Agent sends pseudonymous, aggregate usage and performance events to the configured analytics endpoint. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
 
 Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
 
-Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
+Telemetry is off by default. Enable it globally or for an individual project with `telemetry.enabled: true`, or set `PRIME_AGENT_TELEMETRY=1`. Project settings can only further restrict a global settings opt-out. `PI_OFFLINE=1` and `DO_NOT_TRACK=1` are absolute opt-outs and override every enablement source.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `telemetry.enabled` | boolean | `true` | Send pseudonymous aggregate usage and performance events |
+| `telemetry.enabled` | boolean | `false` | Send pseudonymous aggregate usage and performance events |
 
-Disable analytics with any of:
+Enable analytics in settings with:
+
+```json
+{
+  "telemetry": {
+    "enabled": true
+  }
+}
+```
+
+Keep analytics disabled or enforce an opt-out with any of:
 
 ```json
 {

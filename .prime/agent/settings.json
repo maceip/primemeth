@@ -4,5 +4,8 @@
   "daemonSessionSummary": {
     "provider": "local",
     "model": "local-small"
+  },
+  "telemetry": {
+    "enabled": false
   }
 }
