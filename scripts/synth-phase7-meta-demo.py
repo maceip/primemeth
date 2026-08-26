@@ -85,6 +85,7 @@ def judged_session(workspace: Path, verdict: JudgeVerdict) -> JudgedSession:
             raw_response=f'Thoughts: fixture\nStatus: "{verdict}"',
             prompt="phase7 deterministic judge fixture",
         ),
+        terminal_outcome=None,
     )
 
 
