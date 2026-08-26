@@ -9,6 +9,7 @@ cli_path="${synth_root}/packages/coding-agent/dist/cli.js"
 faux_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/eng-4600-faux-extension.ts"
 summary_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/synth-local-summary-extension.ts"
 setup_script="${script_dir}/setup-offline.sh"
+tsx_path="${synth_root}/node_modules/.bin/tsx"
 
 for required_command in git node npm perl tmux; do
 	if ! command -v "${required_command}" >/dev/null 2>&1; then
@@ -65,7 +66,7 @@ fi
 
 printf 'synth-demo: Phase 1 A3 pinned-catalog build PASS (%s)\n' "${catalog_hash_after}"
 
-for required_file in "${cli_path}" "${faux_fixture_path}" "${summary_fixture_path}" "${setup_script}"; do
+for required_file in "${cli_path}" "${faux_fixture_path}" "${summary_fixture_path}" "${setup_script}" "${tsx_path}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
 		exit 1
@@ -82,6 +83,7 @@ demo_disabled_summary_socket="${demo_dir}/disabled-summary.sock"
 demo_summary_session_dir="${demo_dir}/summary-sessions"
 demo_disabled_summary_session_dir="${demo_dir}/disabled-summary-sessions"
 demo_disabled_summary_project="${demo_dir}/no-summary-project"
+demo_broken_skill_project="${demo_dir}/broken-skill-project"
 demo_tui_session="synth-demo-a1-$$-${RANDOM}"
 demo_summary_tui_session="synth-demo-a2-summary-$$-${RANDOM}"
 demo_disabled_summary_tui_session="synth-demo-a2-disabled-$$-${RANDOM}"
@@ -314,6 +316,52 @@ if (!ids.has("local-main") || !ids.has("local-small")) {
 }
 ' "${demo_agent_dir}/models.json"
 printf 'synth-demo: Phase 1 A1 setup idempotence PASS (%s)\n' "${catalog_after}"
+
+node --input-type=module --eval '
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const [projectRoot, fixtureRoot] = process.argv.slice(1);
+const skillRoot = join(fixtureRoot, ".prime", "agent", "skills", "json");
+mkdirSync(join(skillRoot, "src", "json"), { recursive: true });
+writeFileSync(
+	join(fixtureRoot, ".prime", "agent", "settings.json"),
+	readFileSync(join(projectRoot, ".prime", "agent", "settings.json")),
+);
+writeFileSync(
+	join(skillRoot, "SKILL.md"),
+	`---
+name: json
+description: Deterministic standard-library collision failure fixture.
+---
+
+# Broken JSON Skill
+`,
+);
+writeFileSync(join(skillRoot, "pyproject.toml"), "this is deliberately invalid TOML = [\n");
+writeFileSync(join(skillRoot, "src", "json", "__init__.py"), "VALUE = 1\n");
+' "${synth_root}" "${demo_broken_skill_project}"
+
+broken_bootstrap_output="${demo_dir}/broken-bootstrap.log"
+broken_bootstrap_exit=0
+(
+	cd "${synth_root}"
+	/usr/bin/env "${demo_environment[@]}" \
+		PRIME_AGENT_INSTALL_UV=0 \
+		"${tsx_path}" "${script_dir}/bootstrap-synth-kernel.ts" "${demo_broken_skill_project}"
+) >"${broken_bootstrap_output}" 2>&1 || broken_bootstrap_exit=$?
+if [[ "${broken_bootstrap_exit}" -eq 0 ]]; then
+	sed -n '1,240p' "${broken_bootstrap_output}" >&2
+	printf 'synth-demo: bootstrap accepted a failed enabled Python skill install\n' >&2
+	exit 1
+fi
+if ! grep -Fq 'Python skill json failed to install' "${broken_bootstrap_output}" || \
+	! grep -Fq 'enabled Python skill is absent or stale in the bootstrap receipt' "${broken_bootstrap_output}"; then
+	sed -n '1,240p' "${broken_bootstrap_output}" >&2
+	printf 'synth-demo: bootstrap failure did not identify the unavailable enabled skill\n' >&2
+	exit 1
+fi
+printf 'synth-demo: Phase 1 A1 partial Python-skill install rejection PASS\n'
 
 existing_tmux_sessions="$(
 	{
@@ -609,7 +657,7 @@ if tmux has-session -t "=${demo_disabled_summary_tui_session}" 2>/dev/null; then
 	tmux kill-session -t "=${demo_disabled_summary_tui_session}"
 fi
 demo_disabled_summary_tui_owned=0
-printf 'synth-demo: Phase 1 A2 missing-config no-op PASS\n'
+printf 'synth-demo: Phase 1 A2 missing-config generated-recap suppression PASS\n'
 
 (
 	cd "${synth_root}"
@@ -694,27 +742,37 @@ printf 'synth-demo: Phase 1 A4 analytics opt-in policy PASS\n'
 	/usr/bin/env "${demo_environment[@]}" node --input-type=module --eval '
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { DefaultResourceLoader } from "./packages/coding-agent/dist/core/resource-loader.js";
+import { createAgentSessionServices } from "./packages/coding-agent/dist/core/agent-session-services.js";
 import { SettingsManager } from "./packages/coding-agent/dist/core/settings-manager.js";
 
 const [projectRoot, agentDir] = process.argv.slice(1);
-const loaderOptions = {
-	cwd: projectRoot,
-	agentDir,
+const resourceLoaderOptions = {
 	noExtensions: true,
 	noPromptTemplates: true,
 	noThemes: true,
 	noContextFiles: true,
 };
-const shippedLoader = new DefaultResourceLoader(loaderOptions);
-await shippedLoader.reload();
-const shippedSkills = shippedLoader.getSkills().skills;
+const shippedServices = await createAgentSessionServices({
+	cwd: projectRoot,
+	agentDir,
+	resourceLoaderOptions,
+	telemetryDisabled: true,
+});
+const shippedSkills = shippedServices.resourceLoader.getSkills().skills;
 const shippedNames = new Set(shippedSkills.map((skill) => skill.name));
 if (shippedNames.has("prime-intellect")) {
 	throw new Error("removed Prime Intellect skill remains in the resolved skill set");
 }
 if (shippedNames.has("websearch")) {
 	throw new Error("remote-backed websearch loaded under shipped Synth settings");
+}
+for (const integration of ["linear", "notion"]) {
+	if (shippedNames.has(integration)) {
+		throw new Error(`unauthenticated ${integration} skill loaded in the runtime resource set`);
+	}
+	if (!existsSync(join(projectRoot, "packages/coding-agent/skills", integration))) {
+		throw new Error(`${integration} implementation was removed instead of remaining auth-gated`);
+	}
 }
 for (const removedPath of [
 	join(projectRoot, "packages/coding-agent/skills/prime-intellect"),
@@ -725,12 +783,14 @@ for (const removedPath of [
 	}
 }
 
-const optInLoader = new DefaultResourceLoader({
-	...loaderOptions,
+const optInServices = await createAgentSessionServices({
+	cwd: projectRoot,
+	agentDir,
+	resourceLoaderOptions,
 	settingsManager: SettingsManager.inMemory({ bundledSkills: { websearch: true } }),
+	telemetryDisabled: true,
 });
-await optInLoader.reload();
-const optInSkills = optInLoader.getSkills().skills;
+const optInSkills = optInServices.resourceLoader.getSkills().skills;
 const websearch = optInSkills.find((skill) => skill.name === "websearch");
 if (websearch?.kind !== "python" || websearch.python.importName !== "websearch") {
 	throw new Error("explicit websearch opt-in did not resolve the bundled Python skill");
@@ -738,6 +798,9 @@ if (websearch?.kind !== "python" || websearch.python.importName !== "websearch")
 if (optInSkills.some((skill) => skill.name === "prime-intellect")) {
 	throw new Error("websearch opt-in restored the removed Prime Intellect skill");
 }
+if (optInSkills.some((skill) => skill.name === "linear" || skill.name === "notion")) {
+	throw new Error("websearch opt-in bypassed MCP authentication gates");
+}
 ' "${synth_root}" "${demo_agent_dir}"
 )
-printf 'synth-demo: Phase 1 A6 remote-backed skill defaults PASS\n'
+printf 'synth-demo: Phase 1 A6 remote-backed and auth-gated skill defaults PASS\n'

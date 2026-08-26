@@ -50,7 +50,7 @@ Focused commit: remove the hardcoded Prime provider/model from `daemon-session-s
 
 Build/demo evidence before tests:
 
-- Extend `scripts/synth-demo.sh` with one configured faux/local-small recap and one absent-setting run that proves clean no-op behavior.
+- Extend `scripts/synth-demo.sh` with one configured faux/local-small recap and one absent-setting run that proves no provider-generated recap is persisted.
 - Keep recap behavior worker-local; do not add a daemon command or protocol field.
 
 Minimal test evidence: extend the existing summarizer test with configured-local, absent/partial, and failed-resolution cases, then run it with the existing lifecycle test.
@@ -79,15 +79,13 @@ Compatibility: intentional bundled-resource/default change; no daemon wire chang
 
 ## 7. Gate 1 — One policy regression and live acceptance
 
-Add one small `tests/harness_regression/test_no_vendor_hosts.py` grep regression. Its exact allowlist covers documented opt-in provider/auth/catalog/websearch source paths; it separately asserts that the AI build script cannot invoke `models.dev`, project defaults are local/telemetry-off/websearch-off, and shipped default endpoint URLs are localhost. Do not build an HTTP interception harness in this phase; D-0017 defers it to Phase 8.
+Add one small `tests/harness_regression/test_no_vendor_hosts.py` regression. Its exact allowlist covers documented opt-in provider/auth/catalog/websearch source paths; it separately asserts that the AI build script cannot invoke `models.dev`, project defaults are local/telemetry-off/websearch-off, and shipped default endpoint URLs are localhost. Do not build an HTTP interception harness; D-0026 cancels that air-gap interpretation of the local-first requirement.
 
 Gate evidence:
 
-- `scripts/synth-demo.sh` passes its Phase 1 live flow: idempotent setup, local-catalog TUI boot with no login prompt, faux print success, configured summarizer success, missing-config no-op, analytics off, and remote-backed skills disabled.
+- `scripts/synth-demo.sh` passes its Phase 1 live flow: idempotent setup, local-catalog TUI boot with no login prompt, faux print success, configured summarizer success, missing-config generated-recap suppression, analytics off, and remote-backed skills disabled.
 - `npm run build` is green and leaves `packages/ai/src/models.generated.ts` unchanged.
 - `npm run check` is green.
 - `scripts/proof-faux-print.sh` and `scripts/proof-faux-tui.sh` are green.
 - The focused existing tests named above and the one banned-host grep regression are green.
-- A fresh-context adversarial reviewer verifies the live evidence, looks for unlisted vendored-tree changes and orphans, and finds no stubs reported as capability.
-
-After the gate review, commit the remaining Gate 1 regression/report artifacts, write the Phase 1 report, and follow the control-channel cadence.
+After the local evidence is green, commit the remaining Gate 1 regression artifacts, write the concise Phase 1 report, and proceed directly to Phase 2. The standing external reviewer verifies commits asynchronously and sends fix-forward findings through the control inbox.
