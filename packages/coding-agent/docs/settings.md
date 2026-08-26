@@ -201,8 +201,21 @@ Normally the package manager's global modules location is queried using `root -g
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
+| `daemonSessionSummary.provider` | string | - | Provider used for daemon session recaps. Both summary settings are required. |
+| `daemonSessionSummary.model` | string | - | Model used for daemon session recaps. Both summary settings are required. |
 
 `idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+
+Daemon session recaps are disabled when either summary setting is absent, the selected model is unavailable, or its authentication cannot be resolved. Self-hosted configurations can point the summarizer at a small local model:
+
+```json
+{
+  "daemonSessionSummary": {
+    "provider": "local",
+    "model": "local-small"
+  }
+}
+```
 
 ### Sessions
 

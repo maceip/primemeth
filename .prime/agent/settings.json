@@ -1,4 +1,8 @@
 {
   "defaultProvider": "local",
-  "defaultModel": "local-main"
+  "defaultModel": "local-main",
+  "daemonSessionSummary": {
+    "provider": "local",
+    "model": "local-small"
+  }
 }

@@ -1,11 +1,15 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, test } from "vitest";
 import type { AgentStatus } from "../src/core/session-manager.js";
 import {
+	AGENT_STATUS_SYSTEM_PROMPT,
 	agentStatusChanged,
 	buildStatusContext,
+	generateAgentStatus,
 	parseAgentStatusResponse,
 } from "../src/modes/daemon/daemon-session-summarizer.js";
+import { createHarness } from "./suite/harness.js";
 
 function userMessage(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: 0 } as unknown as AgentMessage;
@@ -17,6 +21,104 @@ function assistantMessage(text: string, tools: string[] = []): AgentMessage {
 }
 
 describe("daemon session summarizer", () => {
+	describe("generateAgentStatus", () => {
+		test("uses the configured local model with bounded provider options", async () => {
+			const harness = await createHarness({
+				provider: "local",
+				models: [
+					{ id: "local-main", reasoning: false },
+					{ id: "local-small", reasoning: false },
+				],
+				settings: { daemonSessionSummary: { provider: "local", model: "local-small" } },
+			});
+			try {
+				harness.setResponses([
+					(context, options, _state, model) => {
+						expect(model).toMatchObject({ provider: "local", id: "local-small" });
+						expect(context.systemPrompt).toBe(AGENT_STATUS_SYSTEM_PROMPT);
+						expect(context.messages[0]?.content).toEqual([
+							{
+								type: "text",
+								text: "<agent-state>idle (finished its turn)</agent-state>\n<conversation>\nuser: finish the demo\n</conversation>",
+							},
+						]);
+						expect(options).toMatchObject({ maxTokens: 400, timeoutMs: 5_000, maxRetries: 0 });
+						return fauxAssistantMessage(
+							"<recap>Completed the local recap demo</recap>\n<status>COMPLETED</status>",
+						);
+					},
+				]);
+
+				await expect(
+					generateAgentStatus({
+						registry: harness.session.modelRegistry,
+						settingsManager: harness.settingsManager,
+						messages: [userMessage("finish the demo")],
+						isWorking: false,
+					}),
+				).resolves.toEqual({ summary: "Completed the local recap demo", taskState: "completed" });
+				expect(harness.faux.state.callCount).toBe(1);
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		test("does not call a provider when summary selection is absent, partial, or unavailable", async () => {
+			const settingsCases = [
+				undefined,
+				{ daemonSessionSummary: { provider: "local" } },
+				{ daemonSessionSummary: { provider: "local", model: "missing" } },
+			];
+			for (const settings of settingsCases) {
+				const harness = await createHarness({
+					provider: "local",
+					models: [{ id: "local-small", reasoning: false }],
+					settings,
+				});
+				try {
+					await expect(
+						generateAgentStatus({
+							registry: harness.session.modelRegistry,
+							settingsManager: harness.settingsManager,
+							messages: [userMessage("finish the demo")],
+							isWorking: false,
+						}),
+					).resolves.toBeUndefined();
+					expect(harness.faux.state.callCount).toBe(0);
+				} finally {
+					harness.cleanup();
+				}
+			}
+		});
+
+		test("returns undefined for aborted and unparseable provider responses", async () => {
+			const harness = await createHarness({
+				provider: "local",
+				models: [{ id: "local-small", reasoning: false }],
+				settings: { daemonSessionSummary: { provider: "local", model: "local-small" } },
+			});
+			try {
+				harness.setResponses([
+					fauxAssistantMessage("partial recap", { stopReason: "aborted" }),
+					fauxAssistantMessage("Completed without the required tags"),
+				]);
+				for (let attempt = 0; attempt < 2; attempt++) {
+					await expect(
+						generateAgentStatus({
+							registry: harness.session.modelRegistry,
+							settingsManager: harness.settingsManager,
+							messages: [userMessage("finish the demo")],
+							isWorking: false,
+						}),
+					).resolves.toBeUndefined();
+				}
+				expect(harness.faux.state.callCount).toBe(2);
+			} finally {
+				harness.cleanup();
+			}
+		});
+	});
+
 	describe("parseAgentStatusResponse", () => {
 		test("parses recap and completion verdict for an idle session", () => {
 			const result = parseAgentStatusResponse(

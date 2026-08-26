@@ -7,6 +7,7 @@ catalog_path="${synth_root}/packages/ai/src/models.generated.ts"
 ai_manifest_path="${synth_root}/packages/ai/package.json"
 cli_path="${synth_root}/packages/coding-agent/dist/cli.js"
 faux_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/eng-4600-faux-extension.ts"
+summary_fixture_path="${synth_root}/packages/coding-agent/test/fixtures/synth-local-summary-extension.ts"
 setup_script="${script_dir}/setup-offline.sh"
 
 for required_command in git node npm perl tmux; do
@@ -64,25 +65,38 @@ fi
 
 printf 'synth-demo: Phase 1 A3 pinned-catalog build PASS (%s)\n' "${catalog_hash_after}"
 
-for required_file in "${cli_path}" "${faux_fixture_path}" "${setup_script}"; do
+for required_file in "${cli_path}" "${faux_fixture_path}" "${summary_fixture_path}" "${setup_script}"; do
 	if [[ ! -f "${required_file}" ]]; then
 		printf 'synth-demo: required A1 artifact missing at %s\n' "${required_file}" >&2
 		exit 1
 	fi
 done
 
-demo_dir="$(mktemp -d /tmp/synth-demo-a1.XXXXXX)"
+demo_dir="$(mktemp -d /tmp/synth-demo-phase1.XXXXXX)"
 demo_agent_dir="${demo_dir}/agent"
 demo_kernel_venv="${demo_dir}/kernel-venv"
 demo_tui_socket="${demo_dir}/tui.sock"
 demo_print_socket="${demo_dir}/print.sock"
+demo_summary_socket="${demo_dir}/summary.sock"
+demo_disabled_summary_socket="${demo_dir}/disabled-summary.sock"
+demo_summary_session_dir="${demo_dir}/summary-sessions"
+demo_disabled_summary_session_dir="${demo_dir}/disabled-summary-sessions"
+demo_disabled_summary_project="${demo_dir}/no-summary-project"
 demo_tui_session="synth-demo-a1-$$-${RANDOM}"
+demo_summary_tui_session="synth-demo-a2-summary-$$-${RANDOM}"
+demo_disabled_summary_tui_session="synth-demo-a2-disabled-$$-${RANDOM}"
 demo_tui_owned=0
+demo_summary_tui_owned=0
+demo_disabled_summary_tui_owned=0
 demo_tui_started=0
 demo_tui_shutdown=0
 demo_print_started=0
 demo_print_shutdown=0
-mkdir -p "${demo_agent_dir}"
+demo_summary_started=0
+demo_summary_shutdown=0
+demo_disabled_summary_started=0
+demo_disabled_summary_shutdown=0
+mkdir -p "${demo_agent_dir}" "${demo_disabled_summary_project}"
 
 demo_environment=(
 	"PRIME_AGENT_CODING_AGENT_DIR=${demo_agent_dir}"
@@ -124,6 +138,12 @@ cleanup_demo() {
 	if [[ "${demo_tui_owned}" -eq 1 ]] && tmux has-session -t "=${demo_tui_session}" 2>/dev/null; then
 		tmux kill-session -t "=${demo_tui_session}" >/dev/null 2>&1
 	fi
+	if [[ "${demo_summary_tui_owned}" -eq 1 ]] && tmux has-session -t "=${demo_summary_tui_session}" 2>/dev/null; then
+		tmux kill-session -t "=${demo_summary_tui_session}" >/dev/null 2>&1
+	fi
+	if [[ "${demo_disabled_summary_tui_owned}" -eq 1 ]] && tmux has-session -t "=${demo_disabled_summary_tui_session}" 2>/dev/null; then
+		tmux kill-session -t "=${demo_disabled_summary_tui_session}" >/dev/null 2>&1
+	fi
 	if [[ "${demo_tui_started}" -eq 1 && "${demo_tui_shutdown}" -eq 0 ]]; then
 		if ! shutdown_demo_daemon "${demo_tui_socket}" >/dev/null 2>&1 || [[ -e "${demo_tui_socket}" ]]; then
 			printf 'synth-demo: could not prove TUI daemon shutdown; preserving %s\n' "${demo_dir}" >&2
@@ -138,6 +158,20 @@ cleanup_demo() {
 			preserve_demo_dir=1
 		fi
 	fi
+	if [[ "${demo_summary_started}" -eq 1 && "${demo_summary_shutdown}" -eq 0 ]]; then
+		if ! shutdown_demo_daemon "${demo_summary_socket}" >/dev/null 2>&1 || [[ -e "${demo_summary_socket}" ]]; then
+			printf 'synth-demo: could not prove summary daemon shutdown; preserving %s\n' "${demo_dir}" >&2
+			demo_exit_code=1
+			preserve_demo_dir=1
+		fi
+	fi
+	if [[ "${demo_disabled_summary_started}" -eq 1 && "${demo_disabled_summary_shutdown}" -eq 0 ]]; then
+		if ! shutdown_demo_daemon "${demo_disabled_summary_socket}" >/dev/null 2>&1 || [[ -e "${demo_disabled_summary_socket}" ]]; then
+			printf 'synth-demo: could not prove disabled-summary daemon shutdown; preserving %s\n' "${demo_dir}" >&2
+			demo_exit_code=1
+			preserve_demo_dir=1
+		fi
+	fi
 	if [[ "${demo_exit_code}" -ne 0 ]]; then
 		for log_file in "${demo_agent_dir}"/logs/*.log; do
 			[[ -f "${log_file}" ]] || continue
@@ -147,7 +181,7 @@ cleanup_demo() {
 	fi
 	if [[ "${preserve_demo_dir}" -eq 0 ]]; then
 		case "${demo_dir}" in
-			/tmp/synth-demo-a1.*) rm -rf -- "${demo_dir}" ;;
+			/tmp/synth-demo-phase1.*) rm -rf -- "${demo_dir}" ;;
 			*)
 				printf 'synth-demo: refusing to remove unexpected path %s\n' "${demo_dir}" >&2
 				demo_exit_code=1
@@ -174,6 +208,66 @@ console.log(JSON.stringify({
 	mtimeNs: String(stat.mtimeNs),
 }));
 ' "${demo_agent_dir}/models.json"
+}
+
+session_has_exact_summary() {
+	node --input-type=module --eval '
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+const [sessionDir, expectedSummary] = process.argv.slice(1);
+if (!existsSync(sessionDir)) process.exit(1);
+for (const name of readdirSync(sessionDir)) {
+	if (!name.endsWith(".jsonl")) continue;
+	for (const line of readFileSync(join(sessionDir, name), "utf8").split("\n")) {
+		if (!line.trim()) continue;
+		let entry;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (
+			entry.type === "agent_status" &&
+			entry.status?.summary === expectedSummary &&
+			entry.status?.taskState === "completed"
+		) {
+			process.exit(0);
+		}
+	}
+}
+process.exit(1);
+' "$1" "$2"
+}
+
+session_has_assistant_without_nonempty_summary() {
+	node --input-type=module --eval '
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+const sessionDir = process.argv[1];
+if (!existsSync(sessionDir)) process.exit(1);
+let sawAssistant = false;
+for (const name of readdirSync(sessionDir)) {
+	if (!name.endsWith(".jsonl")) continue;
+	for (const line of readFileSync(join(sessionDir, name), "utf8").split("\n")) {
+		if (!line.trim()) continue;
+		let entry;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (entry.type === "message" && entry.message?.role === "assistant") {
+			sawAssistant = true;
+		}
+		if (entry.type === "agent_status" && String(entry.status?.summary ?? "").trim()) {
+			process.exit(1);
+		}
+	}
+}
+process.exit(sawAssistant ? 0 : 1);
+' "$1"
 }
 
 first_setup_output="$(
@@ -226,7 +320,7 @@ existing_tmux_sessions="$(
 		tmux list-sessions -F '#{session_name}' 2>/dev/null || true
 	} | wc -l | tr -d ' '
 )"
-printf 'synth-demo: pre-run process receipt tmux_sessions=%s tui_socket=absent print_socket=absent\n' \
+printf 'synth-demo: pre-run process receipt tmux_sessions=%s tui_socket=absent print_socket=absent summary_sockets=absent\n' \
 	"${existing_tmux_sessions}"
 
 printf -v demo_tui_command '%q ' \
@@ -355,3 +449,164 @@ if ! shutdown_demo_daemon "${demo_print_socket}" || [[ -e "${demo_print_socket}"
 fi
 demo_print_shutdown=1
 printf 'synth-demo: Phase 1 A1 configured faux print PASS\n'
+
+printf -v demo_summary_command '%q ' \
+	/usr/bin/env \
+	"${demo_environment[@]}" \
+	node "${cli_path}" \
+	--offline \
+	--cwd "${synth_root}" \
+	--session-dir "${demo_summary_session_dir}" \
+	--daemon-socket "${demo_summary_socket}" \
+	--model local/local-main \
+	--extension "${summary_fixture_path}" \
+	--no-tools \
+	--no-skills \
+	--no-prompt-templates \
+	--no-themes \
+	--no-context-files
+demo_summary_command+='; demo_summary_exit_code=$?; printf '\''\n%s:%s\n'\'' '\''__SYNTH_DEMO_SUMMARY_EXIT__'\'' "${demo_summary_exit_code}"'
+
+demo_summary_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${demo_summary_tui_session}" -c "${synth_root}" -x 80 -y 24 /bin/bash --noprofile --norc)"
+demo_summary_tui_owned=1
+demo_summary_started=1
+tmux send-keys -t "${demo_summary_pane}" -l "${demo_summary_command}"
+tmux send-keys -t "${demo_summary_pane}" Enter
+
+demo_summary_capture=""
+demo_summary_ready=0
+for ((demo_attempt = 0; demo_attempt < 240; demo_attempt++)); do
+	if ! tmux has-session -t "=${demo_summary_tui_session}" 2>/dev/null; then
+		break
+	fi
+	demo_summary_capture="$(tmux capture-pane -t "${demo_summary_pane}" -p -S -)"
+	if grep -Eq 'version[[:space:]]+v[0-9]+' <<<"${demo_summary_capture}" && \
+		grep -Eq 'model[[:space:]]+local-main' <<<"${demo_summary_capture}"; then
+		demo_summary_ready=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_summary_ready}" -ne 1 ]]; then
+	printf '%s\n' "${demo_summary_capture}" >&2
+	printf 'synth-demo: configured-summary TUI did not reach the ready screen\n' >&2
+	exit 1
+fi
+
+tmux send-keys -t "${demo_summary_pane}" -l 'Demonstrate the configured local session recap'
+tmux send-keys -t "${demo_summary_pane}" Enter
+demo_summary_answered=0
+for ((demo_attempt = 0; demo_attempt < 240; demo_attempt++)); do
+	demo_summary_capture="$(tmux capture-pane -t "${demo_summary_pane}" -p -S -)"
+	if grep -Fq 'Synth A2 primary response' <<<"${demo_summary_capture}"; then
+		demo_summary_answered=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_summary_answered}" -ne 1 ]]; then
+	printf '%s\n' "${demo_summary_capture}" >&2
+	printf 'synth-demo: configured-summary TUI did not receive the faux primary response\n' >&2
+	exit 1
+fi
+
+demo_summary_observed=0
+for ((demo_attempt = 0; demo_attempt < 80; demo_attempt++)); do
+	if session_has_exact_summary \
+		"${demo_summary_session_dir}" \
+		'Completed the Synth local recap demonstration'; then
+		demo_summary_observed=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_summary_observed}" -ne 1 ]]; then
+	printf 'synth-demo: configured local recap was not persisted as agent_status\n' >&2
+	exit 1
+fi
+if ! shutdown_demo_daemon "${demo_summary_socket}" || [[ -e "${demo_summary_socket}" ]]; then
+	printf 'synth-demo: configured-summary daemon shutdown failed\n' >&2
+	exit 1
+fi
+demo_summary_shutdown=1
+if tmux has-session -t "=${demo_summary_tui_session}" 2>/dev/null; then
+	tmux kill-session -t "=${demo_summary_tui_session}"
+fi
+demo_summary_tui_owned=0
+printf 'synth-demo: Phase 1 A2 configured local recap PASS\n'
+
+printf -v demo_disabled_summary_command '%q ' \
+	/usr/bin/env \
+	"${demo_environment[@]}" \
+	node "${cli_path}" \
+	--offline \
+	--cwd "${demo_disabled_summary_project}" \
+	--session-dir "${demo_disabled_summary_session_dir}" \
+	--daemon-socket "${demo_disabled_summary_socket}" \
+	--model local/local-main \
+	--extension "${summary_fixture_path}" \
+	--no-tools \
+	--no-skills \
+	--no-prompt-templates \
+	--no-themes \
+	--no-context-files
+demo_disabled_summary_command+='; demo_disabled_summary_exit_code=$?; printf '\''\n%s:%s\n'\'' '\''__SYNTH_DEMO_DISABLED_SUMMARY_EXIT__'\'' "${demo_disabled_summary_exit_code}"'
+
+demo_disabled_summary_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${demo_disabled_summary_tui_session}" -c "${synth_root}" -x 80 -y 24 /bin/bash --noprofile --norc)"
+demo_disabled_summary_tui_owned=1
+demo_disabled_summary_started=1
+tmux send-keys -t "${demo_disabled_summary_pane}" -l "${demo_disabled_summary_command}"
+tmux send-keys -t "${demo_disabled_summary_pane}" Enter
+
+demo_disabled_summary_capture=""
+demo_disabled_summary_ready=0
+for ((demo_attempt = 0; demo_attempt < 240; demo_attempt++)); do
+	if ! tmux has-session -t "=${demo_disabled_summary_tui_session}" 2>/dev/null; then
+		break
+	fi
+	demo_disabled_summary_capture="$(tmux capture-pane -t "${demo_disabled_summary_pane}" -p -S -)"
+	if grep -Eq 'version[[:space:]]+v[0-9]+' <<<"${demo_disabled_summary_capture}" && \
+		grep -Eq 'model[[:space:]]+local-main' <<<"${demo_disabled_summary_capture}"; then
+		demo_disabled_summary_ready=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_disabled_summary_ready}" -ne 1 ]]; then
+	printf '%s\n' "${demo_disabled_summary_capture}" >&2
+	printf 'synth-demo: disabled-summary TUI did not reach the ready screen\n' >&2
+	exit 1
+fi
+
+tmux send-keys -t "${demo_disabled_summary_pane}" -l 'Demonstrate missing session recap configuration'
+tmux send-keys -t "${demo_disabled_summary_pane}" Enter
+demo_disabled_summary_answered=0
+for ((demo_attempt = 0; demo_attempt < 240; demo_attempt++)); do
+	demo_disabled_summary_capture="$(tmux capture-pane -t "${demo_disabled_summary_pane}" -p -S -)"
+	if grep -Fq 'Synth A2 primary response' <<<"${demo_disabled_summary_capture}"; then
+		demo_disabled_summary_answered=1
+		break
+	fi
+	sleep 0.25
+done
+if [[ "${demo_disabled_summary_answered}" -ne 1 ]]; then
+	printf '%s\n' "${demo_disabled_summary_capture}" >&2
+	printf 'synth-demo: disabled-summary TUI did not receive the faux primary response\n' >&2
+	exit 1
+fi
+
+sleep 3
+if ! session_has_assistant_without_nonempty_summary "${demo_disabled_summary_session_dir}"; then
+	printf 'synth-demo: absent recap configuration produced a nonempty summary or no persisted assistant\n' >&2
+	exit 1
+fi
+if ! shutdown_demo_daemon "${demo_disabled_summary_socket}" || [[ -e "${demo_disabled_summary_socket}" ]]; then
+	printf 'synth-demo: disabled-summary daemon shutdown failed\n' >&2
+	exit 1
+fi
+demo_disabled_summary_shutdown=1
+if tmux has-session -t "=${demo_disabled_summary_tui_session}" 2>/dev/null; then
+	tmux kill-session -t "=${demo_disabled_summary_tui_session}"
+fi
+demo_disabled_summary_tui_owned=0
+printf 'synth-demo: Phase 1 A2 missing-config no-op PASS\n'

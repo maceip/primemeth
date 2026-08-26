@@ -3,14 +3,12 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
+import type { SettingsManager } from "../../core/settings-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
-
-const SUMMARY_MODEL_PROVIDER = "prime-inference";
-const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
 
 const SUMMARY_CONTEXT_MESSAGES = 8;
 const SUMMARY_MAX_CHARS_PER_MESSAGE = 600;
@@ -37,9 +35,15 @@ export interface AgentStatusResult {
 	taskState?: AgentTaskState;
 }
 
-/** Resolve the cheap summary model, or undefined when it has no configured auth. */
-export function resolveSummaryModel(registry: ModelRegistry): Model<Api> | undefined {
-	const model = registry.find(SUMMARY_MODEL_PROVIDER, SUMMARY_MODEL_ID);
+/** Resolve the configured summary model, or undefined when it has no configured auth. */
+export function resolveSummaryModel(
+	registry: ModelRegistry,
+	selection: { provider: string; model: string } | undefined,
+): Model<Api> | undefined {
+	if (!selection) {
+		return undefined;
+	}
+	const model = registry.find(selection.provider, selection.model);
 	if (model && registry.hasConfiguredAuth(model)) {
 		return model;
 	}
@@ -142,6 +146,7 @@ export function parseAgentStatusResponse(text: string, isWorking: boolean): Agen
 
 export interface GenerateAgentStatusParams {
 	registry: ModelRegistry;
+	settingsManager: SettingsManager;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
 	signal?: AbortSignal;
@@ -149,11 +154,11 @@ export interface GenerateAgentStatusParams {
 
 /** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal } = params;
+	const { registry, settingsManager, messages, isWorking, signal } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
-	const model = resolveSummaryModel(registry);
+	const model = resolveSummaryModel(registry, settingsManager.getDaemonSessionSummaryModel());
 	if (!model) {
 		return undefined;
 	}
@@ -174,9 +179,16 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 					},
 				],
 			},
-			{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+			{
+				maxTokens: SUMMARY_MAX_TOKENS,
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal,
+				timeoutMs: 5_000,
+				maxRetries: 0,
+			},
 		);
-		if (response.stopReason === "error") {
+		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			return undefined;
 		}
 		const textContent = response.content
@@ -323,6 +335,7 @@ export class DaemonSessionSummarizer {
 		try {
 			const generated = await this.generate({
 				registry: session.modelRegistry,
+				settingsManager: session.settingsManager,
 				messages: contextMessages,
 				isWorking,
 				signal: controller.signal,

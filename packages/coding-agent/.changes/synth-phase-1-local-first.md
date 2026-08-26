@@ -1,2 +1,3 @@
 - Changed startup fallback selection to honor normal provider order instead of preferring Prime Inference.
 - Added optional local model settings for daemon session summaries.
+- Changed daemon session recaps to use the optional configured local summary model instead of Prime Inference.
