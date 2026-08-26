@@ -15,6 +15,74 @@ class SynthConfigError(ValueError):
 
 
 EndpointApi = Literal["openai-completions", "openai-responses"]
+QwenMode = Literal["thinking", "non-thinking"]
+QwenContextProfile = Literal["native", "yarn-1m"]
+
+QWEN_SAMPLING: dict[QwenMode, dict[str, float | int]] = {
+    "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+    },
+    "non-thinking": {
+        "temperature": 0.7,
+        "top_p": 0.80,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    },
+}
+
+QWEN_ROPE_PARAMETERS: dict[QwenContextProfile, dict[str, object]] = {
+    "native": {
+        "mrope_interleaved": True,
+        "mrope_section": [11, 11, 10],
+        "rope_type": "default",
+        "rope_theta": 10000000,
+        "partial_rotary_factor": 0.25,
+    },
+    "yarn-1m": {
+        "mrope_interleaved": True,
+        "mrope_section": [11, 11, 10],
+        "rope_type": "yarn",
+        "rope_theta": 10000000,
+        "partial_rotary_factor": 0.25,
+        "factor": 4.0,
+        "original_max_position_embeddings": 262144,
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class QwenSettings:
+    mode: QwenMode
+    context_profile: QwenContextProfile
+
+    @property
+    def sampling(self) -> dict[str, float | int]:
+        return QWEN_SAMPLING[self.mode]
+
+    @property
+    def rope_parameters(self) -> dict[str, object]:
+        return QWEN_ROPE_PARAMETERS[self.context_profile]
+
+    @property
+    def max_context(self) -> int:
+        return 1_048_576 if self.context_profile == "yarn-1m" else 262_144
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "contextProfile": self.context_profile,
+            "sampling": self.sampling,
+            "ropeParameters": self.rope_parameters,
+            "maxContext": self.max_context,
+        }
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +135,7 @@ class SynthSettings:
     verifier: VerifierSettings
     skill_compiler: SkillCompilerSettings
     kill_switch: bool
+    qwen: QwenSettings | None = None
 
 
 _TOP_LEVEL_KEYS = {
@@ -78,6 +147,7 @@ _TOP_LEVEL_KEYS = {
     "optimizer",
     "skillCompiler",
     "killSwitch",
+    "qwen",
 }
 _ENDPOINT_REQUIRED_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
 _ENDPOINT_OPTIONAL_KEYS = {"api"}
@@ -296,6 +366,23 @@ def _skill_compiler(
     )
 
 
+def _qwen(value: object) -> QwenSettings:
+    mapping = _object(value, "qwen")
+    _exact_keys(mapping, {"mode", "contextProfile"}, "qwen")
+    mode = _string(mapping["mode"], "qwen.mode")
+    if mode not in ("thinking", "non-thinking"):
+        raise SynthConfigError("qwen.mode must be 'thinking' or 'non-thinking'")
+    context_profile = _string(mapping["contextProfile"], "qwen.contextProfile")
+    if context_profile not in ("native", "yarn-1m"):
+        raise SynthConfigError(
+            "qwen.contextProfile must be 'native' or 'yarn-1m'"
+        )
+    return QwenSettings(
+        mode=cast(QwenMode, mode),
+        context_profile=cast(QwenContextProfile, context_profile),
+    )
+
+
 def load_synth_settings(workspace: Path) -> SynthSettings:
     resolved_workspace = workspace.resolve()
     path = resolved_workspace / "synth.json"
@@ -310,6 +397,7 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
                 resolved_workspace, None, enabled_default=False
             ),
             kill_switch=False,
+            qwen=None,
         )
     if not path.is_file():
         raise SynthConfigError(f"config is not a regular file: {path}")
@@ -329,6 +417,7 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
         _exact_keys(kill_switch_mapping, {"all"}, "killSwitch")
         kill_switch = _boolean(kill_switch_mapping["all"], "killSwitch.all")
     endpoint = _endpoint(mapping["endpoint"]) if "endpoint" in mapping else None
+    qwen = _qwen(mapping["qwen"]) if "qwen" in mapping else None
     return SynthSettings(
         workspace=resolved_workspace,
         endpoint=endpoint,
@@ -341,4 +430,5 @@ def load_synth_settings(workspace: Path) -> SynthSettings:
             enabled_default=False,
         ),
         kill_switch=kill_switch,
+        qwen=qwen,
     )

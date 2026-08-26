@@ -35,6 +35,7 @@ from synth.effectiveness import (
 )
 from synth.matts import MattsError, default_matts_run_id, run_matts
 from synth.model import ModelCallError, fixture_path_from_environment
+from synth.model_pull import ModelPullError, Variant, pull_model
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
 from synth.reasoning_bank import ReasoningBankError, distill_path, judge_session
@@ -159,6 +160,37 @@ def _parser() -> argparse.ArgumentParser:
     validate = telemetry_commands.add_parser("validate", help="validate a JSONL stream")
     validate.add_argument("path", type=Path)
 
+    model = commands.add_parser("model", help="manage local model artifacts")
+    model_commands = model.add_subparsers(dest="model_command", required=True)
+    pull = model_commands.add_parser(
+        "pull", help="pull model weights from Hugging Face"
+    )
+    pull.add_argument(
+        "name",
+        nargs="?",
+        default="qwen3.8-flash-next",
+        help="model name or HF repo ID (default: qwen3.8-flash-next)",
+    )
+    pull.add_argument(
+        "--variant",
+        choices=("bf16", "mlx", "gguf"),
+        default="bf16",
+        help="model weight format variant (default: bf16 = Qwen/Qwen3.8-Flash-Next)",
+    )
+    pull.add_argument(
+        "--target",
+        type=Path,
+        default=None,
+        help="destination directory (default: /Users/mac/models/<repo-name>)",
+    )
+    pull.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print download plan and next steps without downloading",
+    )
+
+    commands.add_parser("config", help="show resolved synth configuration")
+
     commands.add_parser("bridge", help=argparse.SUPPRESS)
     return parser
 
@@ -184,12 +216,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = cast(str, args.command)
     try:
         if command == "status":
+            settings = load_synth_settings(Path.cwd())
             _write_json(
                 {
                     "version": __version__,
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": [item.as_dict() for item in CAPABILITIES],
                     "promptPorts": len(prompt_port_manifest()),
+                    "qwen": settings.qwen.as_dict() if settings.qwen else None,
                 }
             )
             return 0
@@ -360,6 +394,60 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write_json(demotion_outcome.as_dict())
             return 0
+        if command == "model":
+            model_command = cast(str, args.model_command)
+            if model_command == "pull":
+                pull_model(
+                    model_name=cast(str, args.name),
+                    variant=cast(Variant, args.variant),
+                    target_dir=cast(Path | None, args.target),
+                    dry_run=cast(bool, args.dry_run),
+                )
+                return 0
+            raise ValueError(f"unknown model command: {model_command}")
+        if command == "config":
+            settings = load_synth_settings(Path.cwd())
+            _write_json(
+                {
+                    "endpoint": (
+                        {
+                            "baseUrl": settings.endpoint.base_url,
+                            "model": settings.endpoint.model,
+                            "smallModel": settings.endpoint.small_model,
+                            "apiKeyEnv": settings.endpoint.api_key_env,
+                            "api": settings.endpoint.api,
+                        }
+                        if settings.endpoint
+                        else None
+                    ),
+                    "qwen": settings.qwen.as_dict() if settings.qwen else None,
+                    "telemetry": {"dir": str(settings.telemetry.directory)},
+                    "memory": {
+                        "enabled": settings.memory.enabled,
+                        "k": settings.memory.top_k,
+                        "minScore": settings.memory.min_score,
+                        "db": str(settings.memory.database_path),
+                        "embedModel": settings.memory.embed_model,
+                        "judgeModel": settings.memory.judge_model,
+                    },
+                    "verifier": {
+                        "interactive": settings.verifier.interactive,
+                        "batch": settings.verifier.batch,
+                        "maxCycles": settings.verifier.max_cycles,
+                        "contGen": {
+                            "enabled": settings.verifier.continue_generation,
+                            "minBudgetFrac": settings.verifier.min_budget_fraction,
+                        },
+                    },
+                    "skillCompiler": {
+                        "enabled": settings.skill_compiler.enabled,
+                        "maxPerSession": settings.skill_compiler.max_per_session,
+                        "quarantine": str(settings.skill_compiler.quarantine_path),
+                    },
+                    "killSwitch": {"all": settings.kill_switch},
+                }
+            )
+            return 0
         if command == "bridge":
             return run_bridge()
         raise ValueError(f"unknown command: {command}")
@@ -370,6 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         MattsError,
         MemoryStoreError,
         ModelCallError,
+        ModelPullError,
         OSError,
         ReasoningBankError,
         ServiceError,

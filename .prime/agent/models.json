@@ -18,6 +18,23 @@
           "name": "Local Small"
         }
       ]
+    },
+    "local-mlx": {
+      "baseUrl": "http://localhost:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "SYNTH_LOCAL_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "qwen3.8-flash-next",
+          "name": "Qwen3.8-Flash-Next",
+          "contextWindow": 262144,
+          "reasoning": true
+        }
+      ]
     }
   }
 }
