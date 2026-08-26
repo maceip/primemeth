@@ -10,7 +10,7 @@ from pathlib import Path
 
 MLX_INSTALL = "uv tool install mlx-lm"
 LLAMA_INSTALL = "brew install llama.cpp"
-QWEN4_LLAMA_SERVER = Path("/tmp/llamacpp-qwen4/build/bin/llama-server")
+LLAMA_SERVER_ENV = "SYNTH_LLAMA_SERVER"
 _MLX_SUPPORT_PROBE = (
     "import importlib\n"
     "import json\n"
@@ -123,8 +123,22 @@ def require_mlx_model_support(model_dir: Path) -> str:
 
 
 def resolve_llama_server() -> list[str]:
-    if os.access(QWEN4_LLAMA_SERVER, os.X_OK):
-        return [str(QWEN4_LLAMA_SERVER)]
+    configured = os.environ.get(LLAMA_SERVER_ENV)
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise EngineError(f"{LLAMA_SERVER_ENV} must be an absolute path")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as error:
+            raise EngineError(
+                f"{LLAMA_SERVER_ENV} is unavailable: {candidate}: {error}"
+            ) from error
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise EngineError(
+                f"{LLAMA_SERVER_ENV} is not an executable file: {resolved}"
+            )
+        return [str(resolved)]
     found = shutil.which("llama-server")
     if found:
         return [found]

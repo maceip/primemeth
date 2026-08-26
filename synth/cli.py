@@ -19,6 +19,7 @@ from middleware.batch_select import select_candidates as _select_candidates
 from middleware.telemetry import TelemetryValidationError, validate_telemetry_file
 from optimizer.cli import main as optimizer_main
 from synth import __version__
+from synth.attribution import MTPLX_PRODUCT_ATTRIBUTION
 from synth.batch import (
     BatchWiringError,
     default_run_id,
@@ -111,7 +112,12 @@ def _parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="manage local model servers")
     serve_commands = serve.add_subparsers(dest="serve_command", required=True)
-    serve_start = serve_commands.add_parser("start", help="start a local model server")
+    serve_start = serve_commands.add_parser(
+        "start",
+        help="start a local model server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=MTPLX_PRODUCT_ATTRIBUTION,
+    )
     serve_start.add_argument("--engine", choices=ENGINE_NAMES, required=True)
     serve_start.add_argument("--model")
     serve_start.add_argument("--quantize", choices=QUANTIZATIONS)
@@ -159,7 +165,6 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--compare-mtp", action="store_true")
     bench.add_argument("--mtp-depth", type=int, default=3)
     bench.add_argument("--api-key-env", default="SYNTH_LOCAL_API_KEY")
-    bench.add_argument("--tokenizer", type=Path)
     bench.add_argument("--run-id")
 
     run = commands.add_parser("run", help="run a coding task through Synth")
@@ -313,6 +318,18 @@ def _service() -> BridgeService:
     return BridgeService(Path.cwd())
 
 
+def _normalize_serve_shorthand(arguments: list[str]) -> list[str]:
+    normalized = list(arguments)
+    explicit_subcommands = {"start", "status", "stop"}
+    if (
+        normalized[:1] == ["serve"]
+        and "--engine" in normalized[1:]
+        and (len(normalized) < 2 or normalized[1] not in explicit_subcommands)
+    ):
+        normalized.insert(1, "start")
+    return normalized
+
+
 def _service_request(command: str, params: JsonObject) -> JsonObject:
     service = _service()
     try:
@@ -322,12 +339,12 @@ def _service_request(command: str, params: JsonObject) -> JsonObject:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = list(argv) if argv is not None else sys.argv[1:]
+    arguments = _normalize_serve_shorthand(
+        list(argv) if argv is not None else sys.argv[1:]
+    )
     if arguments[:1] == ["optimize"]:
         optimizer_main(arguments)
         return 0
-    if arguments[:1] == ["serve"] and "--engine" in arguments[1:]:
-        arguments.insert(1, "start")
     args = _parser().parse_args(arguments)
     command = cast(str, args.command)
     try:
@@ -471,7 +488,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     compare_mtp=cast(bool, args.compare_mtp),
                     mtp_depth=cast(int, args.mtp_depth),
                     api_key_env=cast(str, args.api_key_env),
-                    tokenizer=cast(Path | None, args.tokenizer),
                     run_id=cast(str | None, args.run_id),
                 ),
             )

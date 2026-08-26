@@ -82,6 +82,7 @@ CLASSIFIED_REMOTE_PATHS = {
     "packages/tui/src/stdin-buffer.ts",
     "packages/tui/src/terminal.ts",
     "optimizer/vendor/autosaddler_v2/providers/claude.py",
+    "synth/attribution.py",
 }
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 URL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`<>()]+")
@@ -145,6 +146,11 @@ def test_nonlocal_urls_exist_only_in_classified_runtime_surfaces() -> None:
     )
     claude_provider_path = "optimizer/vendor/autosaddler_v2/providers/claude.py"
     assert remote_hosts[claude_provider_path] == {"api.anthropic.com"}
+    attribution_path = "synth/attribution.py"
+    assert remote_hosts[attribution_path] == {"github.com"}
+    attribution = (ROOT / attribution_path).read_text()
+    assert "Powered by MTPLX" in attribution
+    assert "MTPLX by Youssof Altoukhi" in attribution
 
     optimizer_config = (ROOT / "optimizer" / "configs" / "synth_local.yaml").read_text()
     optimizer_runtime = (ROOT / "optimizer" / "runtime.py").read_text()

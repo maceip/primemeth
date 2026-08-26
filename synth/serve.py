@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal, cast
 
+from synth.attribution import MTPLX_PRODUCT_ATTRIBUTION
 from synth.config import load_synth_settings
 from synth.engine import (
     EngineError,
@@ -29,7 +30,9 @@ LocalEngineName = Literal["mlx", "llama.cpp", "mtplx"]
 ContextProfile = Literal["native", "yarn-1m"]
 LOCAL_ENGINE_NAMES: tuple[LocalEngineName, ...] = ("mlx", "llama.cpp", "mtplx")
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_GGUF_SHARD_PATTERN = re.compile(r"-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$")
+_GGUF_SHARD_PATTERN = re.compile(
+    r"^(?P<prefix>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$"
+)
 
 
 class ServeError(RuntimeError):
@@ -58,6 +61,10 @@ def _offline_environment() -> dict[str, str]:
         {
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
+            "UV_OFFLINE": "1",
+            "UV_NO_SYNC": "1",
+            "UV_PYTHON_DOWNLOADS": "never",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "NO_PROXY": "localhost,127.0.0.1,::1",
             "no_proxy": "localhost,127.0.0.1,::1",
             "PYTHONUNBUFFERED": "1",
@@ -115,24 +122,43 @@ def _gguf_model(model: Path) -> Path:
     )
     if not candidates:
         raise ServeError(f"no GGUF weights under {model}")
-    if len(candidates) > 1:
+    shard_matches = [
+        _GGUF_SHARD_PATTERN.fullmatch(candidate.name) for candidate in candidates
+    ]
+    if any(match is not None for match in shard_matches):
+        if not all(match is not None for match in shard_matches):
+            raise ServeError(
+                f"mixed sharded and unsharded GGUF weights found under {model}"
+            )
         shards: dict[int, Path] = {}
         expected_total: int | None = None
-        for candidate in candidates:
-            match = _GGUF_SHARD_PATTERN.search(candidate.name)
-            if match is None:
-                break
+        expected_prefix: str | None = None
+        expected_parent: Path | None = None
+        for candidate, match in zip(candidates, shard_matches, strict=True):
+            assert match is not None
+            prefix = match.group("prefix")
             part = int(match.group("part"))
             total = int(match.group("total"))
+            if expected_prefix is not None and (
+                prefix != expected_prefix or candidate.parent != expected_parent
+            ):
+                raise ServeError(
+                    f"mixed multipart GGUF prefixes or directories found under {model}"
+                )
             if expected_total is not None and total != expected_total:
-                break
+                raise ServeError(f"inconsistent GGUF shard totals found under {model}")
+            expected_prefix = prefix
+            expected_parent = candidate.parent
             expected_total = total
             shards[part] = candidate
-        else:
-            if expected_total == len(shards) and set(shards) == set(
-                range(1, expected_total + 1)
-            ):
-                return shards[1]
+        if (
+            expected_total == len(candidates)
+            and len(shards) == len(candidates)
+            and set(shards) == set(range(1, expected_total + 1))
+        ):
+            return shards[1]
+        raise ServeError(f"incomplete multipart GGUF weights found under {model}")
+    if len(candidates) > 1:
         raise ServeError(
             f"multiple GGUF weights found under {model}; pass an exact file path"
         )
@@ -203,6 +229,12 @@ def _resolve_mtplx_checkout(checkout: Path | None) -> Path:
         raise ServeError(f"MTPLX checkout is invalid: {resolved}")
     if not (resolved / "mtplx" / "cli.py").is_file():
         raise ServeError(f"MTPLX checkout has no mtplx CLI module: {resolved}")
+    prepared_python = resolved / ".venv" / "bin" / "python"
+    if not prepared_python.is_file() or not os.access(prepared_python, os.X_OK):
+        raise ServeError(
+            "MTPLX checkout has no prepared uv environment; run "
+            f"`uv sync --project {resolved} --python 3.12 --frozen` during setup"
+        )
     return resolved
 
 
@@ -228,6 +260,9 @@ def _mtplx_argv(
         "--python",
         "3.12",
         "--frozen",
+        "--offline",
+        "--no-sync",
+        "--no-python-downloads",
         "python",
         "-m",
         "mtplx.cli",
@@ -358,6 +393,7 @@ def start(
                     "checkout": str(checkout),
                     "draftDepth": draft_depth,
                     "generationMode": "ar" if draft_depth == 0 else "mtp",
+                    "attribution": MTPLX_PRODUCT_ATTRIBUTION,
                 }
             )
         else:

@@ -13,23 +13,45 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import cast
+from typing import IO, cast
 from urllib.error import HTTPError, URLError
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
-from tokenizers import Tokenizer
+from synth.attribution import MTPLX_BENCHMARK_CREDIT, MTPLX_URL
 
 CONTEXT_LADDER = (4_096, 32_768, 131_072, 262_144)
 ONE_M_CONTEXT = 1_048_576
 DEFAULT_ENDPOINT = "http://127.0.0.1:8000/v1"
 DEFAULT_OUTPUT_TOKENS = 192
 MIN_DECODE_TOKENS = 128
+CHAT_TEMPLATE_RESERVE_TOKENS = 256
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class BenchmarkError(RuntimeError):
     """Raised when the benchmark itself cannot be prepared or persisted."""
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +70,6 @@ class BenchmarkRequest:
     compare_mtp: bool = False
     mtp_depth: int = 3
     api_key_env: str = "SYNTH_LOCAL_API_KEY"
-    tokenizer: Path | None = None
     run_id: str | None = None
 
 
@@ -98,6 +119,14 @@ def _validate_request(request: BenchmarkRequest) -> None:
         raise BenchmarkError("--timeout-seconds must be positive")
     if request.chars_per_token <= 0:
         raise BenchmarkError("--chars-per-token must be positive")
+    contexts = (*request.contexts, *((ONE_M_CONTEXT,) if request.try_1m else ()))
+    if any(
+        request.output_tokens + CHAT_TEMPLATE_RESERVE_TOKENS >= context
+        for context in contexts
+    ):
+        raise BenchmarkError(
+            "--output-tokens leaves no input space at a selected context rung"
+        )
     if request.compare_mtp and request.engine != "mtplx":
         raise BenchmarkError("--compare-mtp requires --engine mtplx")
     if not 1 <= request.mtp_depth <= 8:
@@ -109,10 +138,26 @@ def _validate_request(request: BenchmarkRequest) -> None:
 
 
 def _normalized_endpoint(endpoint: str) -> str:
-    normalized = endpoint.strip().rstrip("/")
-    if not normalized.startswith(("http://", "https://")):
-        raise BenchmarkError("--endpoint must be an HTTP(S) URL")
-    return normalized if normalized.endswith("/v1") else normalized + "/v1"
+    raw = endpoint.strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as error:
+        raise BenchmarkError(f"--endpoint is invalid: {error}") from error
+    if parsed.scheme.casefold() != "http":
+        raise BenchmarkError("--endpoint must use HTTP")
+    if parsed.username is not None or parsed.password is not None:
+        raise BenchmarkError("--endpoint must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise BenchmarkError("--endpoint must not contain a query or fragment")
+    hostname = parsed.hostname.casefold() if parsed.hostname is not None else ""
+    if hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise BenchmarkError("--endpoint must use an exact loopback hostname")
+    if port is not None and not 1 <= port <= 65_535:
+        raise BenchmarkError("--endpoint port is out of range")
+    path = parsed.path.rstrip("/")
+    normalized_path = path if path.endswith("/v1") else path + "/v1"
+    return urlunsplit(("http", parsed.netloc, normalized_path, "", ""))
 
 
 def _headers(api_key_env: str) -> dict[str, str]:
@@ -121,6 +166,10 @@ def _headers(api_key_env: str) -> dict[str, str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def _local_opener() -> OpenerDirector:
+    return build_opener(ProxyHandler({}), _NoRedirectHandler())
 
 
 def _json_request(
@@ -137,7 +186,7 @@ def _json_request(
         headers=headers,
         method="POST" if payload is not None else "GET",
     )
-    opener = build_opener(ProxyHandler({}))
+    opener = _local_opener()
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
             raw = response.read()
@@ -305,49 +354,18 @@ def _coding_prompt(
     return prompt, fixture
 
 
-def _tokenizer(request: BenchmarkRequest, model: str) -> Tokenizer | None:
-    configured = request.tokenizer
-    if configured is None:
-        model_path = Path(model).expanduser()
-        if model_path.is_dir():
-            configured = model_path / "tokenizer.json"
-    if configured is None:
-        return None
-    path = configured.expanduser().resolve()
-    if path.is_dir():
-        path = path / "tokenizer.json"
-    if not path.is_file():
-        raise BenchmarkError(f"tokenizer.json is unavailable: {path}")
-    try:
-        return Tokenizer.from_file(str(path))
-    except Exception as error:
-        raise BenchmarkError(f"cannot load tokenizer {path}: {error}") from error
-
-
 def _fitted_prompt(
-    context: int, *, request: BenchmarkRequest, tokenizer: Tokenizer | None
+    context: int, *, request: BenchmarkRequest
 ) -> tuple[str, dict[str, object]]:
-    chars_per_token = request.chars_per_token
+    input_target = context - request.output_tokens - CHAT_TEMPLATE_RESERVE_TOKENS
     prompt, fixture = _coding_prompt(
-        context,
+        input_target,
         seed=request.seed,
-        chars_per_token=chars_per_token,
+        chars_per_token=request.chars_per_token,
     )
-    if tokenizer is None:
-        return prompt, fixture
-    for _ in range(3):
-        measured = len(tokenizer.encode(prompt, add_special_tokens=False).ids)
-        if abs(measured - context) <= max(16, context // 200):
-            break
-        chars_per_token *= context / max(1, measured)
-        prompt, fixture = _coding_prompt(
-            context,
-            seed=request.seed,
-            chars_per_token=chars_per_token,
-        )
-    prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=False).ids)
-    fixture["localTokenizerPromptTokens"] = prompt_tokens
-    fixture["fittedCharsPerToken"] = chars_per_token
+    fixture["contextRung"] = context
+    fixture["reservedOutputTokens"] = request.output_tokens
+    fixture["reservedChatTemplateTokens"] = CHAT_TEMPLATE_RESERVE_TOKENS
     return prompt, fixture
 
 
@@ -384,7 +402,6 @@ def _stream_completion(
     output_tokens: int,
     seed: int,
     timeout_seconds: float,
-    tokenizer: Tokenizer | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "model": model,
@@ -401,13 +418,12 @@ def _stream_completion(
         headers={**headers, "Accept": "text/event-stream"},
         method="POST",
     )
-    opener = build_opener(ProxyHandler({}))
+    opener = _local_opener()
     started = time.monotonic()
     first_token_at: float | None = None
     completion_tokens: int | None = None
     prompt_tokens: int | None = None
     received_chars = 0
-    output_parts: list[str] = []
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
             for raw_line in response:
@@ -435,7 +451,6 @@ def _stream_completion(
                     if first_token_at is None:
                         first_token_at = time.monotonic()
                     received_chars += len(text)
-                    output_parts.append(text)
                 usage = chunk.get("usage")
                 completion_tokens = (
                     _usage_tokens(usage, "completion_tokens") or completion_tokens
@@ -452,23 +467,9 @@ def _stream_completion(
     if first_token_at is None:
         raise BenchmarkError("stream completed without a generated token")
     if completion_tokens is None:
-        if tokenizer is None:
-            raise BenchmarkError(
-                "stream returned no completion_tokens usage and no local tokenizer "
-                "was available; pass --tokenizer"
-            )
-        completion_tokens = len(
-            tokenizer.encode("".join(output_parts), add_special_tokens=False).ids
-        )
-        completion_token_source = "local_tokenizer"
-    else:
-        completion_token_source = "api_usage"
+        raise BenchmarkError("stream returned no native completion_tokens usage")
     if prompt_tokens is None:
-        prompt_tokens = (
-            len(tokenizer.encode(prompt, add_special_tokens=False).ids)
-            if tokenizer is not None
-            else None
-        )
+        raise BenchmarkError("stream returned no native prompt_tokens usage")
     if completion_tokens < MIN_DECODE_TOKENS:
         raise BenchmarkError(
             f"short generation: {completion_tokens} tokens; need at least "
@@ -480,7 +481,7 @@ def _stream_completion(
     return {
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
-        "completionTokenSource": completion_token_source,
+        "completionTokenSource": "api_usage",
         "receivedChars": received_chars,
         "timeToFirstTokenSeconds": first_token_at - started,
         "decodeSeconds": decode_seconds,
@@ -591,6 +592,11 @@ def render_markdown(report: dict[str, object]) -> str:
         "Decode | Wall | Output | MTP speedup |",
         "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|",
     ]
+    if report.get("engine") == "mtplx":
+        rendered[2:2] = [
+            f"Benchmark credit: [{MTPLX_BENCHMARK_CREDIT}]({MTPLX_URL}).",
+            "",
+        ]
     if isinstance(rows, list):
         for value in rows:
             if not isinstance(value, dict):
@@ -640,7 +646,6 @@ def run_benchmark(workspace: Path, request: BenchmarkRequest) -> dict[str, objec
     endpoint = _normalized_endpoint(request.endpoint)
     headers = _headers(request.api_key_env)
     model = request.model or _discover_model(endpoint, headers)
-    tokenizer = _tokenizer(request, model)
     run_id = request.run_id or default_run_id()
     if _RUN_ID_PATTERN.fullmatch(run_id) is None:
         raise BenchmarkError(f"invalid benchmark run id: {run_id!r}")
@@ -659,7 +664,6 @@ def run_benchmark(workspace: Path, request: BenchmarkRequest) -> dict[str, objec
             prompt, fixture = _fitted_prompt(
                 context,
                 request=request,
-                tokenizer=tokenizer,
             )
             for mode in modes:
                 setting_error: str | None = None
@@ -694,7 +698,6 @@ def run_benchmark(workspace: Path, request: BenchmarkRequest) -> dict[str, objec
                             output_tokens=request.output_tokens,
                             seed=request.seed + run - 1,
                             timeout_seconds=request.timeout_seconds,
-                            tokenizer=tokenizer,
                         )
                         row.update({"status": "ok", **measured})
                     except BenchmarkError as error:
@@ -744,6 +747,11 @@ def run_benchmark(workspace: Path, request: BenchmarkRequest) -> dict[str, objec
         "rows": rows,
         "attempts": attempts,
     }
+    if request.engine == "mtplx":
+        report["attribution"] = {
+            "benchmarkCredit": MTPLX_BENCHMARK_CREDIT,
+            "url": MTPLX_URL,
+        }
     output = workspace.expanduser().resolve() / ".synth" / "bench" / run_id
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     report_path = output / "report.json"

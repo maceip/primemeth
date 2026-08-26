@@ -1035,7 +1035,6 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },
     { name = "sqlite-vec" },
-    { name = "tokenizers" },
 ]
 
 [package.optional-dependencies]
@@ -1054,7 +1053,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "sqlite-vec", specifier = ">=0.1.0" },
-    { name = "tokenizers", specifier = ">=0.20.0" },
 ]
 provides-extras = ["dev"]
 
