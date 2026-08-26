@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -55,6 +54,12 @@ FORBIDDEN_PATHS = (
     PurePosixPath("evals"),
     PurePosixPath("data"),
 )
+PYTEST_REQUIREMENT = "pytest>=8.0.0"
+RUFF_REQUIREMENT = "ruff>=0.8.0"
+VERIFIER_RUNTIME_REQUIREMENTS = (
+    "pyyaml>=6.0.2",
+    "jsonschema>=4.23.0",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,29 +94,34 @@ class SynthHarnessVerifier:
         text_errors = _text_change_errors(context)
         commands = (
             (
-                sys.executable,
-                "-m",
+                "ruff check",
+                *_uv_run_prefix(RUFF_REQUIREMENT),
                 "ruff",
                 "check",
-                "optimizer",
-                "tests/harness_regression",
+                str(context.workspace / "optimizer"),
+                str(context.workspace / "tests/harness_regression"),
                 "--exclude",
                 "optimizer/vendor",
             ),
             (
-                sys.executable,
-                "-m",
+                "pytest tests/harness_regression",
+                *_uv_run_prefix(
+                    PYTEST_REQUIREMENT,
+                    *VERIFIER_RUNTIME_REQUIREMENTS,
+                ),
                 "pytest",
-                "tests/harness_regression",
+                str(context.workspace / "tests/harness_regression"),
                 "-q",
                 "-p",
                 "no:cacheprovider",
+                "--rootdir",
+                str(context.workspace),
             ),
         )
         command_failures: list[str] = []
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        for command in commands:
+        for label, *command in commands:
             result = subprocess.run(
                 command,
                 cwd=context.workspace,
@@ -124,7 +134,7 @@ class SynthHarnessVerifier:
             if result.returncode != 0:
                 detail = (result.stdout + result.stderr).strip()[-2_000:]
                 command_failures.append(
-                    f"{' '.join(command[2:4])} exited {result.returncode}: {detail}"
+                    f"{label} exited {result.returncode}: {detail}"
                 )
         failures = [
             *(
@@ -704,8 +714,7 @@ async def _run_fixture_tests(
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
+        *_uv_run_prefix(PYTEST_REQUIREMENT),
         "pytest",
         "-q",
         "-p",
@@ -725,11 +734,29 @@ async def _run_fixture_tests(
         await process.wait()
         raise
     return subprocess.CompletedProcess(
-        args=[sys.executable, "-m", "pytest"],
+        args=["uv", "run", "pytest"],
         returncode=process.returncode or 0,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
     )
+
+
+def _uv_run_prefix(*requirements: str) -> tuple[str, ...]:
+    uv_binary = shutil.which("uv")
+    if uv_binary is None:
+        raise RuntimeError("Synth harness execution requires uv")
+    command = [
+        uv_binary,
+        "run",
+        "--isolated",
+        "--no-project",
+        "--managed-python",
+        "--python",
+        "3.12",
+    ]
+    for requirement in requirements:
+        command.extend(("--with", requirement))
+    return tuple(command)
 
 
 def _object_schema(required: tuple[str, ...]) -> Mapping[str, JsonValue]:

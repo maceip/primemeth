@@ -35,3 +35,7 @@ The pinned V2 Claude and Copilot providers retain their upstream function-local 
 ## 2026-08-25 — Keep the seeded bad skill in test fixtures
 
 The deliberately bad baseline skill lives under `tests/harness_seed/`, not the repository's live `.prime/` tree. Evaluation overlays that seed only when a candidate has no target skill; a gated optimizer candidate may then add the real allowlisted skill path on its own optimizer branch.
+
+## 2026-08-25 — Provision harness tools through isolated uv runs
+
+Candidate verification and fixture scoring provision Ruff and pytest with isolated `uv run` environments on uv-managed Python 3.12. The regression gate also provisions the overlay's declared PyYAML and jsonschema runtime requirements. This keeps both mandatory gates and task scoring functional when the `synth` console script was installed without development extras, without updating the intentionally merge-owned `uv.lock`.
