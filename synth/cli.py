@@ -9,6 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from local_memory.demo import main as _memory_demo_main
+from middleware.batch_driver import run_batch as _run_batch
+from middleware.batch_select import select_candidates as _select_candidates
 from middleware.telemetry import TelemetryValidationError, validate_telemetry_file
 from optimizer.cli import main as optimizer_main
 from synth import __version__
@@ -17,6 +20,8 @@ from synth.capabilities import CAPABILITIES
 from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
 from synth.service import PROTOCOL_VERSION, BridgeService, ServiceError
+
+_REVIEWED_ENGINE_ENTRYPOINTS = (_memory_demo_main, _run_batch, _select_candidates)
 
 
 def _write_json(value: object) -> None:
