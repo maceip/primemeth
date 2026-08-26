@@ -110,12 +110,23 @@ class SynthHarnessSettings:
 
 
 class SynthHarnessVerifier:
-    def __init__(self, *, case_ids: Sequence[str], tsx_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        case_ids: Sequence[str],
+        tsx_path: Path,
+        cli_path: Path,
+    ) -> None:
         self.case_ids = tuple(case_ids)
         self.tsx_path = tsx_path.resolve()
+        self.cli_path = cli_path.resolve()
         if not self.tsx_path.is_file():
             raise FileNotFoundError(
                 f"Synth harness verifier requires tsx at {self.tsx_path}"
+            )
+        if not self.cli_path.is_file():
+            raise FileNotFoundError(
+                f"Synth harness verifier requires the built CLI at {self.cli_path}"
             )
 
     def __call__(self, context: GitVerificationContext) -> GitVerificationVerdict:
@@ -150,6 +161,7 @@ class SynthHarnessVerifier:
         command_failures: list[str] = []
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["SYNTH_TEST_CLI"] = str(self.cli_path)
         environment["SYNTH_TEST_TSX"] = str(self.tsx_path)
         environment["UV_PROJECT_ENVIRONMENT"] = sys.prefix
         for label, *command in commands:
@@ -527,6 +539,7 @@ def build_synth_harness_components(
     verifier = SynthHarnessVerifier(
         case_ids=tuple(all_tasks),
         tsx_path=settings.source_repo / "node_modules" / ".bin" / "tsx",
+        cli_path=settings.source_repo / "packages" / "coding-agent" / "dist" / "cli.js",
     )
     harness = GitHarnessSpace(
         source_repo=settings.source_repo,

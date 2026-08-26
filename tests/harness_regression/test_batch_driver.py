@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,13 @@ from middleware.terminal_outcome import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _FAKE_CLI = _ROOT / "tests" / "batch_fixtures" / "fake_coding_agent.py"
+_BUILT_CLI = Path(
+    os.environ.get(
+        "SYNTH_TEST_CLI",
+        _ROOT / "packages" / "coding-agent" / "dist" / "cli.js",
+    )
+).resolve()
+_TOOLING_ROOT = _BUILT_CLI.parents[3]
 
 
 def _budget(remaining: float | None) -> BudgetState:
@@ -352,7 +360,6 @@ def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
 ) -> None:
     node = shutil.which("node")
     assert node is not None
-    cli_path = _ROOT / "packages" / "coding-agent" / "dist" / "cli.js"
     faux_extension = (
         _ROOT
         / "packages"
@@ -361,7 +368,7 @@ def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
         / "fixtures"
         / "eng-4600-faux-extension.ts"
     )
-    assert cli_path.is_file()
+    assert _BUILT_CLI.is_file()
     assert faux_extension.is_file()
 
     repo = tmp_path / "real-target"
@@ -369,7 +376,10 @@ def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
         _ROOT / ".prime" / "agent" / "extensions" / "synth",
         repo / ".prime" / "agent" / "extensions" / "synth",
     )
-    (repo / "node_modules").symlink_to(_ROOT / "node_modules", target_is_directory=True)
+    (repo / "node_modules").symlink_to(
+        _TOOLING_ROOT / "node_modules",
+        target_is_directory=True,
+    )
     (repo / ".gitignore").write_text(".synth/\n")
     (repo / "synth.json").write_text(
         json.dumps(
@@ -431,7 +441,7 @@ def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
             max_trajectories=1,
         ),
         BatchDriverConfig(
-            cli_argv=(node, str(cli_path)),
+            cli_argv=(node, str(_BUILT_CLI)),
             cli_config_args=(
                 "--offline",
                 "--model",
@@ -452,7 +462,7 @@ def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
                 "PI_SKIP_VERSION_CHECK": "1",
             },
             continue_generation=False,
-            private_daemon_cli=cli_path,
+            private_daemon_cli=_BUILT_CLI,
             acceptance_argv=(sys.executable, "-c", "raise SystemExit(0)"),
         ),
         success_verifier,
