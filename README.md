@@ -1,6 +1,8 @@
-# Synth
+<img width="512" src="https://github.com/user-attachments/assets/dbeb27d8-e24d-4a5e-a7a4-99fe2f8cc658" />
 
-Synth is a local-first, self-hostable coding-agent harness built on a vendored [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace. It combines ReasoningBank memory, BATS budget-aware execution and strategic verification, an AutoSaddler v2 outer optimization loop, and a quarantine-gated Dynamic Skill Compiler behind one TypeScript extension and one Python CLI.
+# PRIME METG
+
+Prime Meth is a local-first, self-hostable coding-agent harness built on a vendored [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) workspace. It combines ReasoningBank memory, BATS budget-aware execution and strategic verification, an AutoSaddler v2 outer optimization loop, and a quarantine-gated Dynamic Skill Compiler behind one TypeScript extension and one Python CLI.
 
 The vendored baseline is upstream commit `9bc005574`. Synth development lives on `synth/dev`; runtime and optimizer state are local and ignored.
 
