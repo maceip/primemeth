@@ -19,10 +19,14 @@ import {
 	BATS_WRAP_UP_INSTRUCTION,
 	batchBudgetUsedFromEnvironment,
 	BudgetTracker,
+	contextScalingFactor,
 	elideOldToolResponses,
 	formatBudgetBlock,
 	formatBudgetStatusLine,
 	injectBatsSystemPrompt,
+	qwenModeForRegime,
+	qwenSamplingForRegime,
+	scaledElisionTurns,
 	shouldSendContinuationNudge,
 } from "./budget.js";
 import {
@@ -38,7 +42,16 @@ import {
 	type CompileRequest,
 	type PersistedCompile,
 } from "./compiler.js";
-import { loadSynthConfig, resolveDataPlanePath, type SynthConfig, type SynthConfigLoadResult } from "./config.js";
+import {
+	loadSynthConfig,
+	QWEN_SAMPLING,
+	QWEN_YARN_1M_ROPE_OVERRIDE,
+	resolveDataPlanePath,
+	type QwenConfig,
+	type QwenMode,
+	type SynthConfig,
+	type SynthConfigLoadResult,
+} from "./config.js";
 import { controlPlaneBlockReason, managedControlPlaneWarning } from "./guard.js";
 import {
 	LESSONS_HEADING,
@@ -1199,6 +1212,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			`config=loaded (${configLoad.path})`,
 			`configEcho=${JSON.stringify(config)}`,
 			`endpoint=${config.endpoint?.baseUrl ?? "unset"} model=${config.endpoint?.model ?? "unset"}`,
+			`qwen=${config.qwen ? `mode=${config.qwen.mode} contextProfile=${config.qwen.contextProfile}` : "off"}`,
 			`telemetry=${runtime.telemetry?.path ?? "off"}`,
 			bridgeLine,
 			`memory=${config.memory.enabled ? "configured" : "off"}`,
@@ -1622,6 +1636,10 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		if (runtime.budget) {
 			const snapshot = runtime.budget.snapshot();
 			let firstUserSeen = false;
+			const elideTurns = scaledElisionTurns(
+				runtime.budget.config.elideToolResponsesAfterTurns,
+				runtime.configLoad.config?.qwen?.contextProfile,
+			);
 			messages = elideOldToolResponses(
 				messages.map((message) => {
 					if (message.role !== "user" || firstUserSeen) {
@@ -1630,7 +1648,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 					firstUserSeen = true;
 					return appendBudgetToUser(message, snapshot);
 				}),
-				runtime.budget.config.elideToolResponsesAfterTurns,
+				elideTurns,
 			).map((message) => appendBudgetToToolResult(message, snapshot));
 			const latest = messages.at(-1);
 			if (snapshot.fullyExhausted && (!latest || !messageContains(latest, BATS_WRAP_UP_INSTRUCTION))) {
@@ -1679,6 +1697,32 @@ export default function synthExtension(pi: ExtensionAPI): void {
 
 	pi.on("before_provider_request", (event, ctx) => {
 		const runtime = runtimeFor(ctx);
+		const qwenConfig = runtime.configLoad.config?.qwen;
+		if (qwenConfig && event.payload && typeof event.payload === "object") {
+			const payloadRecord = event.payload as Record<string, unknown>;
+			const currentRegime = runtime.budget?.snapshot().regime ?? "HIGH";
+			const effectiveMode: QwenMode = runtime.budget
+				? qwenModeForRegime(currentRegime)
+				: qwenConfig.mode;
+			const sampling = QWEN_SAMPLING[effectiveMode];
+			for (const [key, val] of Object.entries(sampling)) {
+				payloadRecord[key] = val;
+			}
+			// Model-card YaRN recipe (opt-in): override targeted at text_config.rope_parameters.
+			// Native profile emits nothing (shipped config untouched).
+			if (qwenConfig.contextProfile === "yarn-1m") {
+				const textConfig =
+					typeof payloadRecord.text_config === "object" && payloadRecord.text_config !== null
+						? (payloadRecord.text_config as Record<string, unknown>)
+						: {};
+				payloadRecord.text_config = {
+					...textConfig,
+					rope_parameters: {
+						...QWEN_YARN_1M_ROPE_OVERRIDE.text_config.rope_parameters,
+					},
+				};
+			}
+		}
 		const provider = latestProvider(runtime);
 		if (provider) {
 			provider.startedAt = performance.now();

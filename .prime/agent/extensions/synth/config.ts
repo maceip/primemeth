@@ -144,6 +144,22 @@ const KillSwitchSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const QwenModeSchema = Type.Union([Type.Literal("thinking"), Type.Literal("non-thinking")], {
+	description: "Qwen sampling mode.",
+});
+
+const QwenContextProfileSchema = Type.Union([Type.Literal("native"), Type.Literal("yarn-1m")], {
+	description: "Qwen context profile (native 262,144 vs opt-in yarn-1m).",
+});
+
+const QwenConfigSchema = Type.Object(
+	{
+		mode: QwenModeSchema,
+		contextProfile: QwenContextProfileSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const SynthConfigSchema = Type.Object(
 	{
 		endpoint: Type.Optional(EndpointSchema),
@@ -154,12 +170,16 @@ export const SynthConfigSchema = Type.Object(
 		optimizer: Type.Optional(OptimizerSchema),
 		skillCompiler: Type.Optional(SkillCompilerSchema),
 		killSwitch: Type.Optional(KillSwitchSchema),
+		qwen: Type.Optional(QwenConfigSchema),
 	},
 	{ additionalProperties: false },
 );
 
 export type SynthConfigFile = Static<typeof SynthConfigSchema>;
 export type SynthEndpointApi = Static<typeof EndpointApiSchema>;
+export type QwenMode = Static<typeof QwenModeSchema>;
+export type QwenContextProfile = Static<typeof QwenContextProfileSchema>;
+export type QwenConfig = Static<typeof QwenConfigSchema>;
 
 export interface SynthEndpointConfig {
 	baseUrl: string;
@@ -182,6 +202,7 @@ export interface SynthConfig {
 	optimizer: Static<typeof OptimizerSchema>;
 	skillCompiler: Static<typeof SkillCompilerSchema>;
 	killSwitch: Static<typeof KillSwitchSchema>;
+	qwen?: QwenConfig;
 }
 
 export interface SynthConfigLoadResult {
@@ -190,6 +211,53 @@ export interface SynthConfigLoadResult {
 	config?: SynthConfig;
 	error?: string;
 }
+
+export const QWEN_SAMPLING: Record<QwenMode, {
+	temperature: number;
+	top_p: number;
+	top_k: number;
+	min_p: number;
+	presence_penalty: number;
+	repetition_penalty: number;
+}> = {
+	thinking: {
+		temperature: 1.0,
+		top_p: 0.95,
+		top_k: 20,
+		min_p: 0.0,
+		presence_penalty: 0.0,
+		repetition_penalty: 1.0,
+	},
+	"non-thinking": {
+		temperature: 0.7,
+		top_p: 0.80,
+		top_k: 20,
+		min_p: 0.0,
+		presence_penalty: 1.5,
+		repetition_penalty: 1.0,
+	},
+};
+
+/**
+ * Model-card YaRN recipe (opt-in) override for 1M context:
+ * Targets text_config.rope_parameters while preserving shipped keys
+ * (mrope_interleaved, mrope_section, partial_rotary_factor, rope_theta)
+ * and setting rope_type='yarn', factor=4.0, original_max_position_embeddings=262144 (262144 x 4 = 1M).
+ * Native profile emits nothing (shipped config untouched).
+ */
+export const QWEN_YARN_1M_ROPE_OVERRIDE = {
+	text_config: {
+		rope_parameters: {
+			mrope_interleaved: true,
+			mrope_section: [11, 11, 10],
+			partial_rotary_factor: 0.25,
+			rope_theta: 10000000,
+			rope_type: "yarn",
+			factor: 4.0,
+			original_max_position_embeddings: 262144,
+		},
+	},
+} as const;
 
 export const SYNTH_CONFIG_DEFAULTS: Omit<SynthConfig, "endpoint"> = {
 	telemetry: { dir: ".synth/telemetry" },
@@ -249,6 +317,7 @@ function normalizeConfig(cwd: string, value: SynthConfigFile): SynthConfig {
 		optimizer: value.optimizer ?? SYNTH_CONFIG_DEFAULTS.optimizer,
 		skillCompiler: value.skillCompiler ?? SYNTH_CONFIG_DEFAULTS.skillCompiler,
 		killSwitch: value.killSwitch ?? SYNTH_CONFIG_DEFAULTS.killSwitch,
+		...(value.qwen ? { qwen: value.qwen } : {}),
 	};
 	resolveDataPlanePath(cwd, config.telemetry.dir);
 	resolveDataPlanePath(cwd, config.memory.db);
