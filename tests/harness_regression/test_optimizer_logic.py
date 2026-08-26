@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from optimizer.synth_harness import anti_cheating_scan
+from middleware.terminal_outcome import TerminationReason
+from optimizer.synth_harness import (
+    anti_cheating_scan,
+    terminal_outcome_for_test_result,
+)
 from optimizer.vendor.autosaddler_v2.core.domain import (
     ArtifactRef,
     Candidate,
@@ -52,6 +56,21 @@ def test_anti_cheating_scan_checks_added_lines_only() -> None:
     )
 
 
+def test_optimizer_uses_shared_terminal_outcome_contract() -> None:
+    passed = terminal_outcome_for_test_result(0, "/tmp/pass.json")
+    failed = terminal_outcome_for_test_result(1, "/tmp/fail.json")
+    timed_out = terminal_outcome_for_test_result(
+        124, "/tmp/timeout.json", timed_out=True
+    )
+
+    assert passed.reward == 1
+    assert passed.termination_reason is TerminationReason.SUCCESS
+    assert failed.reward == 0
+    assert failed.termination_reason is TerminationReason.FAILED_ASSERTION
+    assert timed_out.reward == 0
+    assert timed_out.termination_reason is TerminationReason.TIMEOUT
+
+
 def _candidate(suffix: str) -> Candidate:
     candidate_id = f"sha256:{suffix * 64}"
     return Candidate(
@@ -73,7 +92,7 @@ def _evaluation(
         Observation.create(
             candidate_id=candidate.candidate_id,
             case_id=f"case-{index}",
-            split=split,  # type: ignore[arg-type]
+            split=split,
             repetition=0,
             disposition="success" if score else "task_failure",
             score=score,
@@ -84,8 +103,8 @@ def _evaluation(
     return Evaluation(
         evaluation_id=f"evaluation-{suffix}",
         candidate_id=candidate.candidate_id,
-        split=split,  # type: ignore[arg-type]
-        purpose=purpose,  # type: ignore[arg-type]
+        split=split,
+        purpose=purpose,
         iteration=0,
         requested_case_ids=tuple(item.case_id for item in observations),
         observations=observations,

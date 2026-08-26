@@ -12,12 +12,18 @@ from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    TerminalOutcome,
+    TerminationReason,
+)
 from optimizer.transport import StubPrimeAgentTransport
 from optimizer.vendor.autosaddler_v2.core.domain import (
     ArtifactRef,
     Candidate,
     Case,
     Cost,
+    Disposition,
     Evaluation,
     JsonValue,
     Observation,
@@ -56,6 +62,29 @@ FORBIDDEN_PATHS = (
     PurePosixPath("data"),
 )
 PYTEST_REQUIREMENT = "pytest>=8.0.0"
+
+
+def terminal_outcome_for_test_result(
+    exit_code: int, evidence_uri: str, *, timed_out: bool = False
+) -> TerminalOutcome:
+    evidence = OutcomeEvidence(
+        kind="artifact",
+        uri=evidence_uri,
+        entry_id=None,
+    )
+    if timed_out:
+        return TerminalOutcome(0, TerminationReason.TIMEOUT, evidence)
+    if exit_code == 0:
+        return TerminalOutcome(1, TerminationReason.SUCCESS, evidence)
+    return TerminalOutcome(0, TerminationReason.FAILED_ASSERTION, evidence)
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureTestResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,36 +332,69 @@ class SynthHarnessEvaluator:
             session_id=session_id,
             trace_dir=artifact_dir / "agent-traces" / f"{case.case_id}-{repetition}",
         )
-        transport_outcome = await asyncio.wait_for(
-            self.transport.run(rendered, self.timeout_seconds),
-            timeout=self.timeout_seconds,
-        )
-        test_result = await _run_fixture_tests(workspace, self.timeout_seconds)
         result_path = artifact_dir / "results" / f"{case.case_id}-{repetition}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_timed_out = False
+        try:
+            transport_outcome = await asyncio.wait_for(
+                self.transport.run(rendered, self.timeout_seconds),
+                timeout=self.timeout_seconds,
+            )
+            agent_transcript = transport_outcome.raw_response
+            test_result = await _run_fixture_tests(workspace, self.timeout_seconds)
+        except TimeoutError:
+            agent_timed_out = True
+            agent_transcript = ""
+            test_result = FixtureTestResult(
+                returncode=124,
+                stdout="",
+                stderr="agent transport timed out",
+                timed_out=True,
+            )
+        terminal_outcome = terminal_outcome_for_test_result(
+            test_result.returncode,
+            str(result_path.resolve()),
+            timed_out=test_result.timed_out,
+        )
         result_path.write_text(
             canonical_json(
                 {
-                    "schema_version": "synth-harness-task-result/v1",
+                    "schema_version": "synth-harness-task-result/v2",
                     "case_id": case.case_id,
-                    "agent_transcript": transport_outcome.raw_response,
+                    "agent_transcript": agent_transcript,
+                    "agent_timed_out": agent_timed_out,
                     "pytest_exit_code": test_result.returncode,
+                    "pytest_timed_out": test_result.timed_out and not agent_timed_out,
                     "pytest_stdout": test_result.stdout,
                     "pytest_stderr": test_result.stderr,
+                    "terminal_outcome": terminal_outcome.as_dict(),
                 }
             )
             + "\n",
             encoding="utf-8",
         )
-        passed = test_result.returncode == 0
+        passed = terminal_outcome.succeeded
+        timed_out = (
+            terminal_outcome.termination_reason is TerminationReason.TIMEOUT
+        )
+        disposition: Disposition
+        if passed:
+            disposition = "success"
+            score = 1.0
+        elif timed_out:
+            disposition = "execution_error"
+            score = None
+        else:
+            disposition = "task_failure"
+            score = 0.0
         payload = result_path.read_bytes()
         return Observation.create(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
             split=case.split,
             repetition=repetition,
-            disposition="success" if passed else "task_failure",
-            score=1.0 if passed else 0.0,
+            disposition=disposition,
+            score=score,
             evaluator_fingerprint=self.fingerprint,
             output=ArtifactRef(
                 uri=result_path.relative_to(self.artifact_root).as_posix(),
@@ -342,7 +404,10 @@ class SynthHarnessEvaluator:
             ),
             attempts=attempt_number,
             cost=Cost(rollouts=1),
-            metadata={"task_digest": task.digest},
+            metadata={
+                "task_digest": task.digest,
+                "terminal_outcome": cast(JsonValue, terminal_outcome.as_dict()),
+            },
         )
 
 
@@ -715,7 +780,7 @@ def _copy_candidate_overlays(candidate_root: Path, workspace: Path) -> None:
 async def _run_fixture_tests(
     workspace: Path,
     timeout_seconds: float,
-) -> subprocess.CompletedProcess[str]:
+) -> FixtureTestResult:
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     process = await asyncio.create_subprocess_exec(
@@ -737,12 +802,17 @@ async def _run_fixture_tests(
     except TimeoutError:
         process.kill()
         await process.wait()
-        raise
-    return subprocess.CompletedProcess(
-        args=["uv", "run", "pytest"],
+        return FixtureTestResult(
+            returncode=124,
+            stdout="",
+            stderr="fixture pytest timed out",
+            timed_out=True,
+        )
+    return FixtureTestResult(
         returncode=process.returncode or 0,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        timed_out=False,
     )
 
 

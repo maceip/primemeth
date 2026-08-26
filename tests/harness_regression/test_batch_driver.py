@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,15 @@ from middleware.batch_driver import (
     parse_verification,
     run_batch,
     should_start_fresh_trajectory,
+)
+from middleware.telemetry import TelemetryEvent, validate_telemetry_file
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    OutcomeSignals,
+    TerminalOutcomeReceipt,
+    TerminationReason,
+    classify_terminal_outcome,
+    read_terminal_outcome_receipt,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -155,7 +165,17 @@ def test_batch_preserves_acceptance_memory_seed_and_telemetry(
     trajectory_dir = result.run_dir / "trajectories" / "1"
     metadata = json.loads((trajectory_dir / "trajectory.json").read_text())
     assert result.candidates_recorded == 1
+    assert result.terminal_outcome.reward == 1
+    assert (
+        result.terminal_outcome.termination_reason is TerminationReason.SUCCESS
+    )
     assert metadata["acceptance_exit_code"] == 0
+    assert metadata["terminal_outcome"] == result.terminal_outcome.as_dict()
+    receipt = read_terminal_outcome_receipt(
+        trajectory_dir / "terminal-outcome.json"
+    )
+    assert receipt.outcome == result.terminal_outcome
+    assert receipt.session_id == "fake-session-1"
     assert metadata["next_action"] == "stop_continuation_disabled"
     assert metadata["telemetry"] == ["telemetry/fake.jsonl"]
     assert (trajectory_dir / "telemetry" / "fake.jsonl").is_file()
@@ -207,6 +227,11 @@ def test_acceptance_failure_skips_verifier_and_candidate(tmp_path: Path) -> None
     )
     assert result.candidates_recorded == 0
     assert result.stop_reason == "acceptance_failure"
+    assert result.terminal_outcome.reward == 0
+    assert (
+        result.terminal_outcome.termination_reason
+        is TerminationReason.FAILED_ASSERTION
+    )
     assert metadata["acceptance_exit_code"] == 7
     assert metadata["next_action"] == "stop_acceptance_failure"
     assert not any((result.run_dir / "candidates").iterdir())
@@ -277,6 +302,10 @@ def test_mutated_acceptance_input_is_rejected_before_pytest(tmp_path: Path) -> N
     metadata = json.loads((trajectory_dir / "trajectory.json").read_text())
     assert result.candidates_recorded == 0
     assert result.stop_reason == "acceptance_integrity_failure"
+    assert result.terminal_outcome.reward is None
+    assert (
+        result.terminal_outcome.termination_reason is TerminationReason.UNKNOWN
+    )
     assert metadata["acceptance_exit_code"] == 125
     assert metadata["acceptance_integrity_failures"] == ["test_acceptance.py"]
     assert metadata["next_action"] == "stop_acceptance_integrity_failure"
@@ -286,3 +315,164 @@ def test_mutated_acceptance_input_is_rejected_before_pytest(tmp_path: Path) -> N
     )
     assert not acceptance_marker.exists()
     assert not any((result.run_dir / "candidates").iterdir())
+
+
+def test_timeout_classification_is_deterministic() -> None:
+    evidence = OutcomeEvidence("artifact", "/tmp/timeout.json")
+    outcome = classify_terminal_outcome(
+        OutcomeSignals(
+            agent_exit_code=124,
+            agent_timed_out=True,
+            acceptance_configured=False,
+            acceptance_exit_code=None,
+            acceptance_timed_out=False,
+        ),
+        evidence,
+    )
+    assert outcome.reward == 0
+    assert outcome.termination_reason is TerminationReason.TIMEOUT
+    receipt = TerminalOutcomeReceipt(
+        run_id="timeout-fixture",
+        trajectory_index=1,
+        session_id=None,
+        outcome=outcome,
+        signals=OutcomeSignals(
+            agent_exit_code=124,
+            agent_timed_out=True,
+            acceptance_configured=False,
+            acceptance_exit_code=None,
+            acceptance_timed_out=False,
+        ),
+    )
+    assert TerminalOutcomeReceipt.from_mapping(receipt.as_dict()) == receipt
+
+
+def test_private_daemon_commits_acceptance_outcome_to_extension_telemetry(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    cli_path = _ROOT / "packages" / "coding-agent" / "dist" / "cli.js"
+    faux_extension = (
+        _ROOT
+        / "packages"
+        / "coding-agent"
+        / "test"
+        / "fixtures"
+        / "eng-4600-faux-extension.ts"
+    )
+    assert cli_path.is_file()
+    assert faux_extension.is_file()
+
+    repo = tmp_path / "real-target"
+    shutil.copytree(
+        _ROOT / ".prime" / "agent" / "extensions" / "synth",
+        repo / ".prime" / "agent" / "extensions" / "synth",
+    )
+    (repo / "node_modules").symlink_to(_ROOT / "node_modules", target_is_directory=True)
+    (repo / ".gitignore").write_text(".synth/\n")
+    (repo / "synth.json").write_text(
+        json.dumps(
+            {
+                "verifier": {
+                    "interactive": False,
+                    "batch": False,
+                    "maxCycles": 0,
+                    "contGen": {"enabled": False, "minBudgetFrac": 0.2},
+                }
+            }
+        )
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "add",
+            "-f",
+            ".gitignore",
+            "synth.json",
+            ".prime",
+            "node_modules",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Synth Fixture",
+            "-c",
+            "user.email=synth@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+
+    def success_verifier(_request: VerificationRequest) -> dict[str, object]:
+        return {
+            "verification": "immutable acceptance passed",
+            "decision": "SUCCESS",
+            "justification": "fixture",
+            "trajectory_summary": "faux print session completed",
+            "details": {},
+        }
+
+    result = run_batch(
+        BatchTaskSpec(
+            target_repo=repo,
+            prompt="Return the faux response",
+            max_trajectories=1,
+        ),
+        BatchDriverConfig(
+            cli_argv=(node, str(cli_path)),
+            cli_config_args=(
+                "--offline",
+                "--model",
+                "faux/faux",
+                "--extension",
+                str(faux_extension),
+                "--no-tools",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-themes",
+                "--no-context-files",
+            ),
+            run_id="terminal-handshake",
+            timeout_seconds=60,
+            env={
+                "PRIME_AGENT_CODING_AGENT_DIR": str(tmp_path / "agent-dir"),
+                "PI_OFFLINE": "1",
+                "PI_SKIP_VERSION_CHECK": "1",
+            },
+            continue_generation=False,
+            private_daemon_cli=cli_path,
+            acceptance_argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+        success_verifier,
+    )
+
+    trajectory_dir = result.run_dir / "trajectories" / "1"
+    telemetry_files = tuple((trajectory_dir / "telemetry").glob("*.jsonl"))
+    assert len(telemetry_files) == 1
+    assert validate_telemetry_file(telemetry_files[0]).events > 0
+    events = [
+        TelemetryEvent.from_json_line(line)
+        for line in telemetry_files[0].read_text().splitlines()
+        if line.strip()
+    ]
+    terminal_events = [event for event in events if event.kind == "session.outcome"]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].outcome == result.terminal_outcome
+    assert terminal_events[0].outcome is not None
+    assert terminal_events[0].outcome.reward == 1
+    assert (
+        terminal_events[0].outcome.termination_reason
+        is TerminationReason.SUCCESS
+    )

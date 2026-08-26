@@ -18,6 +18,7 @@ from typing import Literal, cast
 import yaml  # type: ignore[import-untyped]
 
 from middleware.batch_driver import BatchDriverConfig, BatchTaskSpec, run_batch
+from middleware.terminal_outcome import TerminalOutcome, TerminationReason
 from synth.batch import PersistedSessionVerifier
 from synth.config import EndpointApi
 
@@ -127,12 +128,12 @@ class TrialOutcome:
     repetition: int
     task_id: str
     condition: Condition
-    success: bool
+    terminal_outcome: TerminalOutcome
     agent_exit_code: int
     acceptance_exit_code: int | None
     acceptance_timed_out: bool
     acceptance_integrity_failures: tuple[str, ...]
-    stop_reason: str
+    batch_stop_reason: str
     tool_calls: int
     tool_names: tuple[str, ...]
     total_tokens: int
@@ -145,6 +146,10 @@ class TrialOutcome:
     artifact_dir: Path
     diff_sha256: str
 
+    @property
+    def success(self) -> bool:
+        return self.terminal_outcome.succeeded
+
     def as_dict(self, report_root: Path) -> dict[str, object]:
         return {
             "ordinal": self.ordinal,
@@ -152,11 +157,12 @@ class TrialOutcome:
             "taskId": self.task_id,
             "condition": self.condition,
             "success": self.success,
+            "terminalOutcome": self.terminal_outcome.as_dict(),
             "agentExitCode": self.agent_exit_code,
             "acceptanceExitCode": self.acceptance_exit_code,
             "acceptanceTimedOut": self.acceptance_timed_out,
             "acceptanceIntegrityFailures": list(self.acceptance_integrity_failures),
-            "stopReason": self.stop_reason,
+            "batchStopReason": self.batch_stop_reason,
             "toolCalls": self.tool_calls,
             "toolNames": list(self.tool_names),
             "totalTokens": self.total_tokens,
@@ -407,7 +413,7 @@ def run_effectiveness_evaluation(
         )
 
     report: dict[str, object] = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "complete": _evaluation_complete(trials),
         "runId": selected_run_id,
         "createdAt": datetime.now(UTC).isoformat(),
@@ -556,6 +562,18 @@ def _run_trial(
     agent_exit_code = _nonnegative_integer(
         metadata.get("exit_code"), "trajectory exit_code"
     )
+    try:
+        metadata_outcome = TerminalOutcome.from_mapping(
+            metadata.get("terminal_outcome")
+        )
+    except ValueError as error:
+        raise EffectivenessError(
+            f"trajectory terminal outcome is invalid: {error}"
+        ) from error
+    if metadata_outcome != result.terminal_outcome:
+        raise EffectivenessError(
+            "trajectory and run result disagree about the terminal outcome"
+        )
     session_value = metadata.get("session_jsonl")
     session_path = (
         result.run_dir / session_value
@@ -572,16 +590,12 @@ def _run_trial(
         repetition=repetition,
         task_id=fixture.task_id,
         condition=condition,
-        success=(
-            result.trajectories_run == 1
-            and agent_exit_code == 0
-            and acceptance_exit_code == 0
-        ),
+        terminal_outcome=result.terminal_outcome,
         agent_exit_code=agent_exit_code,
         acceptance_exit_code=acceptance_exit_code,
         acceptance_timed_out=acceptance_timed_out,
         acceptance_integrity_failures=acceptance_integrity_failures,
-        stop_reason=result.stop_reason,
+        batch_stop_reason=result.stop_reason,
         tool_calls=metrics.tool_calls,
         tool_names=metrics.tool_names,
         total_tokens=metrics.total_tokens,
@@ -754,6 +768,9 @@ def _aggregate(trials: list[TrialOutcome]) -> dict[str, object]:
     return {
         "trials": len(trials),
         "successes": sum(trial.success for trial in trials),
+        "unknownRewards": sum(
+            trial.terminal_outcome.reward is None for trial in trials
+        ),
         "successRate": fmean(1.0 if trial.success else 0.0 for trial in trials),
         "meanToolCalls": fmean(trial.tool_calls for trial in trials),
         "meanTokens": fmean(trial.total_tokens for trial in trials),
@@ -767,11 +784,10 @@ def _aggregate(trials: list[TrialOutcome]) -> dict[str, object]:
 
 def _evaluation_complete(trials: list[TrialOutcome]) -> bool:
     return bool(trials) and all(
-        trial.agent_exit_code == 0
-        and trial.session_jsonl is not None
-        and trial.acceptance_exit_code in (0, 1)
-        and not trial.acceptance_timed_out
-        and not trial.acceptance_integrity_failures
+        trial.session_jsonl is not None
+        and trial.terminal_outcome.reward in (0, 1)
+        and trial.terminal_outcome.termination_reason
+        in {TerminationReason.SUCCESS, TerminationReason.FAILED_ASSERTION}
         for trial in trials
     )
 

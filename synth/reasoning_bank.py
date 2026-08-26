@@ -16,6 +16,8 @@ from local_memory.prompts_reasoning_bank import (
 )
 from local_memory.retrieval import MemoryRetriever
 from local_memory.store import MemoryStore, NewMemory
+from middleware.telemetry import load_terminal_outcome
+from middleware.terminal_outcome import TerminalOutcome
 from synth.config import SynthSettings, load_synth_settings
 from synth.model import configured_model_callable
 from synth.protocol import JsonObject, JsonValue
@@ -31,8 +33,15 @@ class JudgedSession:
     trajectory: SessionTrajectory
     settings: SynthSettings
     result: JudgeResult
+    terminal_outcome: TerminalOutcome | None
 
     def as_dict(self) -> JsonObject:
+        outcome_value = cast(
+            JsonValue,
+            self.terminal_outcome.as_dict()
+            if self.terminal_outcome is not None
+            else None,
+        )
         return {
             "sessionId": self.trajectory.session_id,
             "leafId": self.trajectory.leaf_id,
@@ -40,6 +49,7 @@ class JudgedSession:
             "thoughts": self.result.thoughts,
             "taskState": self.trajectory.task_state,
             "taskQuery": self.trajectory.task_query,
+            "terminalOutcome": outcome_value,
         }
 
 
@@ -134,6 +144,9 @@ def judge_session(
     if settings.kill_switch:
         raise ReasoningBankError("Synth kill switch is active")
     model_call = configured_model_callable(settings, fixture_path)
+    terminal_outcome = load_terminal_outcome(
+        settings.telemetry.directory, trajectory.session_id
+    )
     result = TrajectoryJudge(model_call).judge(
         task_query=trajectory.task_query,
         trajectory=trajectory.trajectory,
@@ -141,8 +154,14 @@ def judge_session(
         response=trajectory.response,
         task_state=trajectory.task_state,
         exit_code=exit_code,
+        terminal_outcome=terminal_outcome,
     )
-    return JudgedSession(trajectory=trajectory, settings=settings, result=result)
+    return JudgedSession(
+        trajectory=trajectory,
+        settings=settings,
+        result=result,
+        terminal_outcome=terminal_outcome,
+    )
 
 
 def distill_session(

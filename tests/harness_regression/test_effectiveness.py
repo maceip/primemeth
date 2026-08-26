@@ -6,6 +6,11 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    TerminalOutcome,
+    TerminationReason,
+)
 from synth.effectiveness import (
     EndpointSpec,
     TrialOutcome,
@@ -140,12 +145,16 @@ def test_evaluation_complete_rejects_acceptance_timeout_and_integrity_failure(
         repetition=1,
         task_id="fixture",
         condition="memory_off",
-        success=True,
+        terminal_outcome=TerminalOutcome(
+            1,
+            TerminationReason.SUCCESS,
+            OutcomeEvidence("artifact", "/tmp/success.json"),
+        ),
         agent_exit_code=0,
         acceptance_exit_code=0,
         acceptance_timed_out=False,
         acceptance_integrity_failures=(),
-        stop_reason="continuation_disabled",
+        batch_stop_reason="continuation_disabled",
         tool_calls=0,
         tool_names=(),
         total_tokens=0,
@@ -162,7 +171,17 @@ def test_evaluation_complete_rejects_acceptance_timeout_and_integrity_failure(
     assert _evaluation_complete([completed]) is True
     assert (
         _evaluation_complete(
-            [replace(completed, success=False, acceptance_exit_code=1)]
+            [
+                replace(
+                    completed,
+                    terminal_outcome=TerminalOutcome(
+                        0,
+                        TerminationReason.FAILED_ASSERTION,
+                        OutcomeEvidence("artifact", "/tmp/failure.json"),
+                    ),
+                    acceptance_exit_code=1,
+                )
+            ]
         )
         is True
     )
@@ -171,10 +190,14 @@ def test_evaluation_complete_rejects_acceptance_timeout_and_integrity_failure(
             [
                 replace(
                     completed,
-                    success=False,
+                    terminal_outcome=TerminalOutcome(
+                        0,
+                        TerminationReason.TIMEOUT,
+                        OutcomeEvidence("artifact", "/tmp/timeout.json"),
+                    ),
                     acceptance_exit_code=124,
                     acceptance_timed_out=True,
-                    stop_reason="acceptance_timeout",
+                    batch_stop_reason="acceptance_timeout",
                 )
             ]
         )
@@ -185,10 +208,14 @@ def test_evaluation_complete_rejects_acceptance_timeout_and_integrity_failure(
             [
                 replace(
                     completed,
-                    success=False,
+                    terminal_outcome=TerminalOutcome(
+                        None,
+                        TerminationReason.UNKNOWN,
+                        OutcomeEvidence("artifact", "/tmp/integrity.json"),
+                    ),
                     acceptance_exit_code=125,
                     acceptance_integrity_failures=("test_fixture.py",),
-                    stop_reason="acceptance_integrity_failure",
+                    batch_stop_reason="acceptance_integrity_failure",
                 )
             ]
         )

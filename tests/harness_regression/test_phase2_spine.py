@@ -10,7 +10,16 @@ import pytest
 from middleware.telemetry import (
     TelemetryEvent,
     TelemetryValidationError,
+    load_terminal_outcome,
     validate_telemetry_file,
+)
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    OutcomeSignals,
+    Reward,
+    TerminalOutcome,
+    TerminationReason,
+    classify_terminal_outcome,
 )
 from synth.bridge import run_bridge
 
@@ -94,4 +103,80 @@ def test_mirrored_telemetry_schema_enforces_shape_and_sequence(
 
     path.write_text(f"{json.dumps(first)}\n{json.dumps(telemetry_event(3, 'turn'))}\n")
     with pytest.raises(TelemetryValidationError, match="expected sequence 2"):
+        validate_telemetry_file(path)
+
+
+@pytest.mark.parametrize(
+    ("reason", "reward"),
+    [
+        (TerminationReason.SUCCESS, 1),
+        (TerminationReason.FAILED_ASSERTION, 0),
+        (TerminationReason.TIMEOUT, 0),
+        (TerminationReason.BUDGET_EXHAUSTED, None),
+        (TerminationReason.TOOL_ERROR, None),
+        (TerminationReason.UNKNOWN, None),
+    ],
+)
+def test_terminal_outcome_contract_accepts_all_reasons(
+    reason: TerminationReason, reward: Reward
+) -> None:
+    outcome = TerminalOutcome(
+        reward,
+        reason,
+        OutcomeEvidence("transcript", "/tmp/session.jsonl", "entry-1"),
+    )
+    assert TerminalOutcome.from_mapping(outcome.as_dict()) == outcome
+
+
+@pytest.mark.parametrize(
+    ("reason", "reward"),
+    [
+        (TerminationReason.SUCCESS, 0),
+        (TerminationReason.FAILED_ASSERTION, None),
+        (TerminationReason.TIMEOUT, None),
+        (TerminationReason.BUDGET_EXHAUSTED, 0),
+        (TerminationReason.UNKNOWN, 0),
+    ],
+)
+def test_terminal_outcome_contract_rejects_nondeterministic_reward_claims(
+    reason: TerminationReason, reward: Reward
+) -> None:
+    with pytest.raises(ValueError):
+        TerminalOutcome(
+            reward,
+            reason,
+            OutcomeEvidence("artifact", "/tmp/result.json"),
+        )
+
+
+def test_terminal_outcome_classifier_and_telemetry_are_single_source(
+    tmp_path: Path,
+) -> None:
+    evidence = OutcomeEvidence("artifact", "/tmp/acceptance.json")
+    outcome = classify_terminal_outcome(
+        OutcomeSignals(
+            agent_exit_code=0,
+            agent_timed_out=False,
+            acceptance_configured=True,
+            acceptance_exit_code=0,
+            acceptance_timed_out=False,
+        ),
+        evidence,
+    )
+    first = telemetry_event(1, "session.start")
+    terminal = {
+        **telemetry_event(2, "session.outcome"),
+        "outcome": outcome.as_dict(),
+    }
+    path = tmp_path / "session-1.jsonl"
+    path.write_text(f"{json.dumps(first)}\n{json.dumps(terminal)}\n")
+
+    assert validate_telemetry_file(path).events == 2
+    assert load_terminal_outcome(tmp_path, "session-1") == outcome
+
+    path.write_text(
+        f"{json.dumps(first)}\n{json.dumps(terminal)}\n"
+        f"{json.dumps({**terminal, 'eventId': 'event-3', 'sequence': 3})}\n"
+    )
+    with pytest.raises(TelemetryValidationError, match="multiple terminal outcomes"):
         validate_telemetry_file(path)

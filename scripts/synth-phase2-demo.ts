@@ -191,6 +191,7 @@ try {
 	for (const kind of [
 		"session.start",
 		"session.shutdown",
+		"session.outcome",
 		"turn",
 		"tool",
 		"provider",
@@ -199,6 +200,12 @@ try {
 	] as const) {
 		assert.ok(kinds.has(kind), `telemetry omitted ${kind}`);
 	}
+	const outcomeEvents = events.filter((event) => event.kind === "session.outcome");
+	assert.equal(outcomeEvents.length, 1);
+	assert.equal(outcomeEvents[0]?.outcome?.reward, null);
+	assert.equal(outcomeEvents[0]?.outcome?.termination_reason, "UNKNOWN");
+	assert.equal(outcomeEvents[0]?.outcome?.evidence.kind, "transcript");
+	assert.equal(outcomeEvents[0]?.outcome?.evidence.uri, harness.sessionManager.getSessionFile());
 	assert.ok(
 		events.some(
 			(event) =>
@@ -246,6 +253,21 @@ try {
 	assert.throws(
 		() => new TelemetryWriter(corruptDir, "corrupt-session"),
 		/cannot resume telemetry file/,
+	);
+	const resumedWriter = new TelemetryWriter(dirname(telemetryPath), sessionId);
+	assert.equal(resumedWriter.hasTerminalOutcome(), true);
+	assert.throws(
+		() =>
+			resumedWriter.append({
+				sessionId,
+				kind: "session.outcome",
+				outcome: {
+					reward: null,
+					termination_reason: "UNKNOWN",
+					evidence: { kind: "artifact", uri: telemetryPath, entry_id: null },
+				},
+			}),
+		/already contains a terminal outcome/,
 	);
 	copyFileSync(telemetryPath, telemetryOutput);
 	console.log(

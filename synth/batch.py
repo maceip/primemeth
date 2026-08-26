@@ -298,6 +298,7 @@ def run_bats(
         "trajectoriesRun": run_result.trajectories_run,
         "candidatesRecorded": run_result.candidates_recorded,
         "stopReason": run_result.stop_reason,
+        "terminalOutcome": run_result.terminal_outcome.as_dict(),
         "selection": str(selection.path),
         "selectedCandidate": selection.selected_candidate,
         "metrics": dict(selection.metrics),

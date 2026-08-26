@@ -5,10 +5,12 @@ wired into the synth CLI at Phase 5 integration (orphan-check exemption)
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +20,16 @@ from pathlib import Path
 from typing import Literal, Protocol, TypedDict
 
 from middleware.prompts_bats import PR_CHAT_VERIFICATION
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    OutcomeSignals,
+    TerminalOutcome,
+    TerminalOutcomeReceipt,
+    TerminationReason,
+    classify_terminal_outcome,
+    session_terminal_outcome_receipt_path,
+    write_terminal_outcome_receipt,
+)
 
 VerificationDecision = Literal["SUCCESS", "CONTINUE", "PIVOT"]
 VerifierResponse = str | Mapping[str, object]
@@ -104,6 +116,23 @@ class BudgetState:
         )
         return tuple(value for value in fractions if value is not None)
 
+    @property
+    def fully_exhausted(self) -> bool:
+        hard_exhausted = any(
+            counter.remaining == 0
+            for counter in (self.tokens, self.cost_usd)
+            if counter.remaining is not None
+        )
+        bounded_tools = tuple(
+            counter
+            for counter in (self.bash, self.edit, self.ipython, self.subagents)
+            if counter.remaining is not None
+        )
+        return hard_exhausted or (
+            bool(bounded_tools)
+            and all(counter.remaining == 0 for counter in bounded_tools)
+        )
+
 
 @dataclass(frozen=True)
 class BatchTaskSpec:
@@ -146,6 +175,7 @@ class TrajectoryResult:
     acceptance_stderr: str
     acceptance_timed_out: bool
     acceptance_integrity_failures: tuple[str, ...]
+    terminal_outcome: TerminalOutcome
     telemetry_files: tuple[Path, ...]
 
 
@@ -166,6 +196,7 @@ class BatchRunResult:
     trajectories_run: int
     candidates_recorded: int
     stop_reason: str
+    terminal_outcome: TerminalOutcome
 
 
 class BatchDriverError(RuntimeError):
@@ -276,6 +307,7 @@ def run_batch(
     candidates_recorded = 0
     trajectories_run = 0
     stop_reason = "trajectory_limit"
+    terminal_outcome: TerminalOutcome | None = None
     carried_budget_used: Mapping[str, float] = {}
     try:
         for index in range(1, task.max_trajectories + 1):
@@ -293,21 +325,35 @@ def run_batch(
                     trajectory_dir=trajectory_dir,
                     initial_budget_used=carried_budget_used,
                 )
+                terminal_outcome = result.terminal_outcome
                 verification: VerificationPayload | None = None
                 candidate_number: int | None = None
 
-                if result.exit_code != 0:
+                if (
+                    result.terminal_outcome.termination_reason
+                    is TerminationReason.TIMEOUT
+                ):
+                    action = (
+                        "stop_cli_failure"
+                        if result.timed_out
+                        else "stop_acceptance_timeout"
+                    )
+                    stop_reason = (
+                        "cli_timeout" if result.timed_out else "acceptance_timeout"
+                    )
+                elif (
+                    result.terminal_outcome.termination_reason
+                    is TerminationReason.TOOL_ERROR
+                    and result.terminal_outcome.reward == 0
+                ):
                     action = "stop_cli_failure"
-                    stop_reason = "cli_timeout" if result.timed_out else "cli_failure"
-                elif result.acceptance_timed_out:
-                    action = "stop_acceptance_timeout"
-                    stop_reason = "acceptance_timeout"
+                    stop_reason = "cli_failure"
                 elif result.acceptance_integrity_failures:
                     action = "stop_acceptance_integrity_failure"
                     stop_reason = "acceptance_integrity_failure"
                 elif (
-                    result.acceptance_exit_code is not None
-                    and result.acceptance_exit_code != 0
+                    result.terminal_outcome.termination_reason
+                    is TerminationReason.FAILED_ASSERTION
                 ):
                     action = "stop_acceptance_failure"
                     stop_reason = "acceptance_failure"
@@ -368,6 +414,9 @@ def run_batch(
     finally:
         worktree_parent.rmdir()
 
+    if terminal_outcome is None:
+        raise BatchDriverError("batch completed without a terminal outcome")
+
     _write_json(
         run_dir / "run.json",
         {
@@ -379,6 +428,7 @@ def run_batch(
             "trajectories_run": trajectories_run,
             "candidates_recorded": candidates_recorded,
             "stop_reason": stop_reason,
+            "terminal_outcome": terminal_outcome.as_dict(),
             "continue_generation": config.continue_generation,
             "min_budget_fraction": config.min_budget_fraction,
         },
@@ -388,6 +438,7 @@ def run_batch(
         trajectories_run=trajectories_run,
         candidates_recorded=candidates_recorded,
         stop_reason=stop_reason,
+        terminal_outcome=terminal_outcome,
     )
 
 
@@ -473,6 +524,32 @@ def _invoke_trajectory(
 
     session_dir = trajectory_dir / "session"
     session_dir.mkdir()
+    durable_receipt_path = (trajectory_dir / "terminal-outcome.json").resolve()
+    handoff_path = session_dir / ".synth-terminal-outcome.json"
+    pending_signals = OutcomeSignals(
+        agent_exit_code=0,
+        agent_timed_out=False,
+        acceptance_configured=bool(config.acceptance_argv),
+        acceptance_exit_code=None,
+        acceptance_timed_out=False,
+    )
+    write_terminal_outcome_receipt(
+        handoff_path,
+        TerminalOutcomeReceipt(
+            run_id=config.run_id,
+            trajectory_index=index,
+            session_id=None,
+            outcome=classify_terminal_outcome(
+                pending_signals,
+                OutcomeEvidence(
+                    kind="artifact",
+                    uri=str(durable_receipt_path),
+                    entry_id=None,
+                ),
+            ),
+            signals=pending_signals,
+        ),
+    )
     daemon_socket = worktree.parent / f"daemon-{index}.sock"
     command = [
         *config.cli_argv,
@@ -496,6 +573,9 @@ def _invoke_trajectory(
     env["SYNTH_BATCH_FORCE_VERIFIER"] = "1"
     env["DO_NOT_TRACK"] = "1"
     env["PRIME_AGENT_TELEMETRY"] = "0"
+    outcome_token = secrets.token_urlsafe(32)
+    if config.private_daemon_cli is not None:
+        env["SYNTH_BATCH_OUTCOME_TOKEN"] = outcome_token
     if initial_budget_used:
         env["SYNTH_BATCH_BUDGET_USED_JSON"] = json.dumps(
             initial_budget_used, separators=(",", ":"), sort_keys=True
@@ -521,6 +601,94 @@ def _invoke_trajectory(
             exit_code = 124
             stdout = _timeout_output(error.stdout)
             stderr = _timeout_output(error.stderr)
+        acceptance_exit_code: int | None = None
+        acceptance_stdout = ""
+        acceptance_stderr = ""
+        acceptance_timed_out = False
+        acceptance_integrity_failures = (
+            _acceptance_integrity_failures(config, worktree)
+            if config.acceptance_argv and not timed_out and exit_code == 0
+            else ()
+        )
+        if acceptance_integrity_failures:
+            acceptance_exit_code = 125
+            acceptance_stderr = (
+                "acceptance integrity failure: "
+                + ", ".join(acceptance_integrity_failures)
+                + "\n"
+            )
+        elif config.acceptance_argv and not timed_out and exit_code == 0:
+            acceptance_env = env.copy()
+            acceptance_env["SYNTH_ACCEPTANCE_WORKTREE"] = str(worktree)
+            try:
+                acceptance = subprocess.run(
+                    config.acceptance_argv,
+                    cwd=worktree,
+                    env=acceptance_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=config.acceptance_timeout_seconds,
+                )
+                acceptance_exit_code = acceptance.returncode
+                acceptance_stdout = acceptance.stdout
+                acceptance_stderr = acceptance.stderr
+            except subprocess.TimeoutExpired as error:
+                acceptance_timed_out = True
+                acceptance_exit_code = 124
+                acceptance_stdout = _timeout_output(error.stdout)
+                acceptance_stderr = _timeout_output(error.stderr)
+
+        (trajectory_dir / "stdout.txt").write_text(stdout)
+        (trajectory_dir / "stderr.txt").write_text(stderr)
+        (trajectory_dir / "acceptance-stdout.txt").write_text(acceptance_stdout)
+        (trajectory_dir / "acceptance-stderr.txt").write_text(acceptance_stderr)
+        session_jsonl = _find_session_jsonl(session_dir)
+        budget = (
+            parse_budget_text(session_jsonl.read_text())
+            if session_jsonl is not None
+            else None
+        )
+        signals = OutcomeSignals(
+            agent_exit_code=exit_code,
+            agent_timed_out=timed_out,
+            acceptance_configured=bool(config.acceptance_argv),
+            acceptance_exit_code=acceptance_exit_code,
+            acceptance_timed_out=acceptance_timed_out,
+            acceptance_integrity_failures=acceptance_integrity_failures,
+        )
+        terminal_outcome = classify_terminal_outcome(
+            signals,
+            OutcomeEvidence(
+                kind="artifact",
+                uri=str(durable_receipt_path),
+                entry_id=None,
+            ),
+            budget_fully_exhausted=budget.fully_exhausted if budget else False,
+        )
+        receipt = TerminalOutcomeReceipt(
+            run_id=config.run_id,
+            trajectory_index=index,
+            session_id=_session_id(session_jsonl),
+            outcome=terminal_outcome,
+            signals=signals,
+        )
+        write_terminal_outcome_receipt(durable_receipt_path, receipt)
+        if config.private_daemon_cli is not None and session_jsonl is not None:
+            write_terminal_outcome_receipt(
+                session_terminal_outcome_receipt_path(session_jsonl),
+                receipt,
+            )
+            _deliver_terminal_outcome(
+                config=config,
+                daemon_socket=daemon_socket,
+                worktree=worktree,
+                session_dir=session_dir,
+                session_jsonl=session_jsonl,
+                environment=env,
+                token=outcome_token,
+                receipt=receipt,
+            )
     finally:
         if config.private_daemon_cli is not None:
             _shutdown_private_daemon(
@@ -531,59 +699,11 @@ def _invoke_trajectory(
                 environment=env,
             )
 
-    acceptance_exit_code: int | None = None
-    acceptance_stdout = ""
-    acceptance_stderr = ""
-    acceptance_timed_out = False
-    acceptance_integrity_failures = (
-        _acceptance_integrity_failures(config, worktree)
-        if config.acceptance_argv and not timed_out and exit_code == 0
-        else ()
-    )
-    if acceptance_integrity_failures:
-        acceptance_exit_code = 125
-        acceptance_stderr = (
-            "acceptance integrity failure: "
-            + ", ".join(acceptance_integrity_failures)
-            + "\n"
-        )
-    elif config.acceptance_argv and not timed_out and exit_code == 0:
-        acceptance_env = env.copy()
-        acceptance_env["SYNTH_ACCEPTANCE_WORKTREE"] = str(worktree)
-        try:
-            acceptance = subprocess.run(
-                config.acceptance_argv,
-                cwd=worktree,
-                env=acceptance_env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=config.acceptance_timeout_seconds,
-            )
-            acceptance_exit_code = acceptance.returncode
-            acceptance_stdout = acceptance.stdout
-            acceptance_stderr = acceptance.stderr
-        except subprocess.TimeoutExpired as error:
-            acceptance_timed_out = True
-            acceptance_exit_code = 124
-            acceptance_stdout = _timeout_output(error.stdout)
-            acceptance_stderr = _timeout_output(error.stderr)
-
-    (trajectory_dir / "stdout.txt").write_text(stdout)
-    (trajectory_dir / "stderr.txt").write_text(stderr)
-    (trajectory_dir / "acceptance-stdout.txt").write_text(acceptance_stdout)
-    (trajectory_dir / "acceptance-stderr.txt").write_text(acceptance_stderr)
     diff = _capture_diff(worktree)
     (trajectory_dir / "diff.patch").write_text(diff)
     telemetry_files = _preserve_telemetry(
         worktree / config.telemetry_relative_dir,
         trajectory_dir / "telemetry",
-    )
-    session_jsonl = _find_session_jsonl(session_dir)
-    budget = (
-        parse_budget_text(session_jsonl.read_text())
-        if session_jsonl is not None
-        else None
     )
     return TrajectoryResult(
         index=index,
@@ -599,6 +719,7 @@ def _invoke_trajectory(
         acceptance_stderr=acceptance_stderr,
         acceptance_timed_out=acceptance_timed_out,
         acceptance_integrity_failures=acceptance_integrity_failures,
+        terminal_outcome=terminal_outcome,
         telemetry_files=telemetry_files,
     )
 
@@ -674,6 +795,24 @@ def _find_session_jsonl(session_dir: Path) -> Path | None:
     return roots[0]
 
 
+def _session_id(session_jsonl: Path | None) -> str | None:
+    if session_jsonl is None:
+        return None
+    first_line = session_jsonl.read_text().splitlines()[0]
+    try:
+        decoded: object = json.loads(first_line)
+    except json.JSONDecodeError as error:
+        raise BatchDriverError(
+            f"session header is invalid JSON: {session_jsonl}"
+        ) from error
+    if not isinstance(decoded, Mapping) or decoded.get("type") != "session":
+        raise BatchDriverError(f"session has no v3 header: {session_jsonl}")
+    session_id = decoded.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        raise BatchDriverError(f"session header has no id: {session_jsonl}")
+    return session_id
+
+
 def _capture_diff(worktree: Path) -> str:
     tracked = _git(worktree, "diff", "--binary", "--full-index", "HEAD", "--")
     untracked_output = _git(
@@ -727,6 +866,7 @@ def _record_candidate(
             "exit_code": trajectory.exit_code,
             "acceptance_exit_code": trajectory.acceptance_exit_code,
             "acceptance_timed_out": trajectory.acceptance_timed_out,
+            "terminal_outcome": trajectory.terminal_outcome.as_dict(),
         },
     )
 
@@ -766,6 +906,8 @@ def _write_trajectory_metadata(
             "acceptance_exit_code": result.acceptance_exit_code,
             "acceptance_timed_out": result.acceptance_timed_out,
             "acceptance_integrity_failures": list(result.acceptance_integrity_failures),
+            "terminal_outcome": result.terminal_outcome.as_dict(),
+            "terminal_outcome_receipt": "terminal-outcome.json",
             "acceptance_stdout": "acceptance-stdout.txt",
             "acceptance_stderr": "acceptance-stderr.txt",
             "stdout": "stdout.txt",
@@ -841,6 +983,77 @@ def _shutdown_private_daemon(
         raise BatchDriverError("private daemon shutdown timed out") from error
     if completed.returncode != 0:
         raise BatchDriverError("private daemon shutdown failed")
+
+
+def _deliver_terminal_outcome(
+    *,
+    config: BatchDriverConfig,
+    daemon_socket: Path,
+    worktree: Path,
+    session_dir: Path,
+    session_jsonl: Path,
+    environment: Mapping[str, str],
+    token: str,
+    receipt: TerminalOutcomeReceipt,
+) -> None:
+    encoded_receipt = base64.urlsafe_b64encode(
+        json.dumps(
+            receipt.as_dict(), separators=(",", ":"), sort_keys=True
+        ).encode()
+    ).decode().rstrip("=")
+    command = [
+        *config.cli_argv,
+        *config.cli_config_args,
+        "--daemon-socket",
+        str(daemon_socket),
+        "--cwd",
+        str(worktree),
+        "--session-dir",
+        str(session_dir),
+        "--resume",
+        str(session_jsonl),
+        "--print",
+        f"/synth outcome {token} {encoded_receipt}",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=worktree,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise BatchDriverError("terminal outcome delivery timed out") from error
+    accepted_receipt = _session_has_terminal_outcome_ack(session_jsonl)
+    if completed.returncode != 0 or not accepted_receipt:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise BatchDriverError(
+            "terminal outcome delivery failed"
+            + (f": {detail[-2_000:]}" if detail else "")
+        )
+
+
+def _session_has_terminal_outcome_ack(session_jsonl: Path) -> bool:
+    for line_number, line in enumerate(session_jsonl.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            decoded: object = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise BatchDriverError(
+                f"session line {line_number} is invalid JSON: {session_jsonl}"
+            ) from error
+        if (
+            isinstance(decoded, Mapping)
+            and decoded.get("type") == "custom_message"
+            and decoded.get("customType") == "synth.command"
+            and decoded.get("content") == "Synth terminal outcome accepted."
+        ):
+            return True
+    return False
 
 
 def _timeout_output(value: bytes | str | None) -> str:

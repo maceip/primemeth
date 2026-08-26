@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -55,7 +55,9 @@ import {
 	type BudgetSnapshot,
 	copyUsage,
 	digestValue,
+	parseTerminalOutcomeReceipt,
 	TelemetryWriter,
+	type TerminalOutcome,
 	type TelemetryEventInput,
 } from "./telemetry.js";
 import {
@@ -71,6 +73,9 @@ import {
 	type PersistedVerification,
 	VerifierClient,
 } from "./verifier.js";
+
+const BATCH_OUTCOME_TOKEN = process.env.SYNTH_BATCH_OUTCOME_TOKEN;
+delete process.env.SYNTH_BATCH_OUTCOME_TOKEN;
 
 interface TranscriptRef {
 	sessionFile: string;
@@ -139,11 +144,21 @@ interface SessionRuntime {
 	compileRequests: Map<string, PersistedCompile>;
 	activeCompileRequest?: CompileRequest;
 	compileInFlight?: Promise<void>;
+	batchOutcome?: TerminalOutcome;
+	outcomePersisted: boolean;
+	lastToolError?: TranscriptRef;
+	terminalToolError?: TranscriptRef;
 	shuttingDown: boolean;
 }
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function secureTokenEquals(actual: string, expected: string): boolean {
+	const actualBytes = Buffer.from(actual);
+	const expectedBytes = Buffer.from(expected);
+	return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
 function assistantUsage(message: AgentMessage): Usage | undefined {
@@ -203,6 +218,7 @@ function createRuntime(cwd: string): SessionRuntime {
 		verificationCycles: 0,
 		verificationInFlight: false,
 		compileRequests: new Map(),
+		outcomePersisted: false,
 		shuttingDown: false,
 	};
 }
@@ -504,15 +520,92 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function appendTelemetry(runtime: SessionRuntime, ctx: ExtensionContext, event: TelemetryEventInput): void {
+	function appendTelemetry(runtime: SessionRuntime, ctx: ExtensionContext, event: TelemetryEventInput): boolean {
 		if (!runtime.telemetry) {
-			return;
+			return false;
 		}
 		try {
 			runtime.telemetry.append(event);
+			return true;
 		} catch (error) {
 			runtime.telemetry = undefined;
 			warn(runtime, ctx, "telemetry", `telemetry disabled after a write failure: ${errorMessage(error)}`);
+			return false;
+		}
+	}
+
+	function outcomeEvidence(runtime: SessionRuntime, ctx: ExtensionContext): TerminalOutcome["evidence"] | undefined {
+		const pointer = transcript(ctx);
+		if (pointer) {
+			return { kind: "transcript", uri: pointer.sessionFile, entry_id: pointer.entryId };
+		}
+		if (runtime.telemetry) {
+			return { kind: "artifact", uri: runtime.telemetry.path, entry_id: null };
+		}
+		return undefined;
+	}
+
+	function runtimeTerminalOutcome(runtime: SessionRuntime, ctx: ExtensionContext): TerminalOutcome | undefined {
+		const evidence = outcomeEvidence(runtime, ctx);
+		if (!evidence) return undefined;
+		if (runtime.budget?.snapshot().fullyExhausted) {
+			return { reward: null, termination_reason: "BUDGET_EXHAUSTED", evidence };
+		}
+		if (runtime.terminalToolError) {
+			return {
+				reward: null,
+				termination_reason: "TOOL_ERROR",
+				evidence: {
+					kind: "transcript",
+					uri: runtime.terminalToolError.sessionFile,
+					entry_id: runtime.terminalToolError.entryId,
+				},
+			};
+		}
+		return { reward: null, termination_reason: "UNKNOWN", evidence };
+	}
+
+	function managedBatchSession(ctx: ExtensionContext): boolean {
+		return (
+			process.env.SYNTH_BATCH_RUN_ID !== undefined &&
+			process.env.SYNTH_BATCH_TRAJECTORY_INDEX !== undefined &&
+			(ctx.sessionManager.getHeader()?.rlmDepth ?? 0) === 0
+		);
+	}
+
+	function batchTerminalOutcome(runtime: SessionRuntime, ctx: ExtensionContext): TerminalOutcome | undefined {
+		const runId = process.env.SYNTH_BATCH_RUN_ID;
+		const rawIndex = process.env.SYNTH_BATCH_TRAJECTORY_INDEX;
+		if (!runId || !rawIndex || !managedBatchSession(ctx)) return undefined;
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)) {
+			warn(runtime, ctx, "terminal-outcome", "batch terminal outcome ignored because the run id is unsafe");
+			return undefined;
+		}
+		const trajectoryIndex = Number(rawIndex);
+		if (!Number.isSafeInteger(trajectoryIndex) || trajectoryIndex < 1) {
+			warn(runtime, ctx, "terminal-outcome", "batch terminal outcome ignored because its trajectory index is invalid");
+			return undefined;
+		}
+		if (runtime.batchOutcome) return runtime.batchOutcome;
+		return undefined;
+	}
+
+	function persistTerminalOutcome(runtime: SessionRuntime, ctx: ExtensionContext): void {
+		if (runtime.outcomePersisted || !runtime.telemetry) return;
+		const managedOutcome = batchTerminalOutcome(runtime, ctx);
+		if (managedBatchSession(ctx) && !managedOutcome) return;
+		const outcome = managedOutcome ?? runtimeTerminalOutcome(runtime, ctx);
+		if (!outcome) return;
+		const pointer = transcript(ctx);
+		if (
+			appendTelemetry(runtime, ctx, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				kind: "session.outcome",
+				outcome,
+				...(pointer ? { transcript: pointer } : {}),
+			})
+		) {
+			runtime.outcomePersisted = true;
 		}
 	}
 
@@ -1188,6 +1281,41 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			const runtime = runtimeFor(ctx);
 			const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			if (subcommand === "outcome") {
+				const [token, encodedReceipt, ...extra] = rest;
+				if (
+					!BATCH_OUTCOME_TOKEN ||
+					!token ||
+					!encodedReceipt ||
+					extra.length > 0 ||
+					!secureTokenEquals(token, BATCH_OUTCOME_TOKEN)
+				) {
+					commandOutput(pi, "Synth terminal outcome rejected.");
+					return;
+				}
+				try {
+					const decoded = Buffer.from(encodedReceipt, "base64url");
+					if (decoded.toString("base64url") !== encodedReceipt) {
+						throw new Error("receipt encoding is not canonical base64url");
+					}
+					const receipt = parseTerminalOutcomeReceipt(JSON.parse(decoded.toString("utf8")));
+					const runId = process.env.SYNTH_BATCH_RUN_ID;
+					const trajectoryIndex = Number(process.env.SYNTH_BATCH_TRAJECTORY_INDEX);
+					if (
+						receipt.run_id !== runId ||
+						receipt.trajectory_index !== trajectoryIndex ||
+						(receipt.session_id !== null && receipt.session_id !== ctx.sessionManager.getSessionId())
+					) {
+						throw new Error("receipt identity does not match the active batch session");
+					}
+					runtime.batchOutcome = receipt.outcome;
+					commandOutput(pi, "Synth terminal outcome accepted.");
+				} catch (error) {
+					warn(runtime, ctx, "terminal-outcome-command", `terminal outcome command rejected: ${errorMessage(error)}`);
+					commandOutput(pi, "Synth terminal outcome rejected.");
+				}
+				return;
+			}
 			if (subcommand === "status") {
 				commandOutput(pi, await statusText(runtime, ctx));
 				return;
@@ -1299,6 +1427,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		try {
 			const telemetryDir = resolveDataPlanePath(ctx.cwd, config.telemetry.dir);
 			runtime.telemetry = new TelemetryWriter(telemetryDir, ctx.sessionManager.getSessionId());
+			runtime.outcomePersisted = runtime.telemetry.hasTerminalOutcome();
 		} catch (error) {
 			telemetryFailed = true;
 			runtime.telemetry = undefined;
@@ -1443,6 +1572,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 			data: { reason: event.reason },
 		});
 		await runtime.bridge?.close();
+		if (event.reason !== "reload") persistTerminalOutcome(runtime, ctx);
 		enqueueDistillation(runtime, ctx, event.reason);
 		runtimes.delete(ctx.sessionManager);
 	});
@@ -1648,6 +1778,7 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		const started = runtime.toolStarts.get(event.toolCallId);
 		runtime.toolStarts.delete(event.toolCallId);
 		const pointer = transcript(ctx, started?.entryId ?? toolCallEntryId(ctx, event.toolCallId));
+		runtime.lastToolError = event.isError ? pointer : undefined;
 		appendTelemetry(runtime, ctx, {
 			sessionId: ctx.sessionManager.getSessionId(),
 			kind: "tool",
@@ -1667,6 +1798,8 @@ export default function synthExtension(pi: ExtensionAPI): void {
 		const runtime = runtimeFor(ctx);
 		const lastMessage = event.messages.at(-1);
 		const pointer = transcript(ctx, lastMessage ? messageEntryId(ctx, lastMessage) : ctx.sessionManager.getLeafId());
+		runtime.terminalToolError =
+			lastMessage?.role === "assistant" && lastMessage.stopReason === "error" ? runtime.lastToolError : undefined;
 		appendTelemetry(runtime, ctx, {
 			sessionId: ctx.sessionManager.getSessionId(),
 			kind: "agent.end",

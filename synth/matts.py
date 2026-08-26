@@ -31,6 +31,7 @@ from local_memory.prompts_reasoning_bank import (
 )
 from local_memory.store import Embedder, MemoryStatus, MemoryStore, NewMemory
 from middleware.batch_driver import BatchDriverConfig, BatchTaskSpec, run_batch
+from middleware.terminal_outcome import TerminalOutcome
 from synth.batch import PersistedSessionVerifier, resolve_agent_cli
 from synth.config import load_synth_settings
 from synth.model import configured_model_callable
@@ -51,6 +52,7 @@ class ParallelTrajectory:
     session_path: Path
     exit_code: int
     stop_reason: str
+    terminal_outcome: TerminalOutcome
     started: float
     finished: float
 
@@ -298,6 +300,7 @@ def _run_parallel_trajectory(
         session_path=result.run_dir / session_value,
         exit_code=exit_code,
         stop_reason=result.stop_reason,
+        terminal_outcome=result.terminal_outcome,
         started=started,
         finished=finished,
     )
@@ -317,6 +320,7 @@ def _sequentially_reverify(
             response=trajectory.response,
             task_state=trajectory.task_state,
             exit_code=artifact.exit_code,
+            terminal_outcome=artifact.terminal_outcome,
         )
         reverified = _reverify(trajectory, initial, model_call)
         results.append(
@@ -375,6 +379,7 @@ def _trajectory_report(target: Path, item: ReverifiedTrajectory) -> dict[str, ob
         "sessionId": item.trajectory.session_id,
         "agentExitCode": item.artifact.exit_code,
         "batchStopReason": item.artifact.stop_reason,
+        "terminalOutcome": item.artifact.terminal_outcome.as_dict(),
         "durationSeconds": item.artifact.finished - item.artifact.started,
         "initialJudgment": {
             "verdict": item.initial.verdict,

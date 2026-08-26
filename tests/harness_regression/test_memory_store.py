@@ -14,6 +14,11 @@ from local_memory.judge import JudgeResponseError, JudgeVerdict, TrajectoryJudge
 from local_memory.prompts_reasoning_bank import FAILED_SI, SUCCESSFUL_SI
 from local_memory.retrieval import MemoryRetriever
 from local_memory.store import MemoryItemType, MemoryStatus, MemoryStore, NewMemory
+from middleware.terminal_outcome import (
+    OutcomeEvidence,
+    TerminalOutcome,
+    TerminationReason,
+)
 
 
 class SemanticStubEmbedder:
@@ -227,10 +232,18 @@ def test_judge_uses_native_priors_as_context_not_verdict() -> None:
         trajectory="Only one of two requested changes was applied.",
         task_state="completed",
         exit_code=0,
+        terminal_outcome=TerminalOutcome(
+            1,
+            TerminationReason.SUCCESS,
+            OutcomeEvidence("artifact", "/tmp/acceptance.json"),
+        ),
     )
     assert result.verdict == "failure"
     assert "Task state: completed" in captured_prompt
     assert "Exit code: 0" in captured_prompt
+    assert "Terminal reward: 1" in captured_prompt
+    assert "Terminal reason: SUCCESS" in captured_prompt
+    assert "Terminal evidence: /tmp/acceptance.json" in captured_prompt
 
     with pytest.raises(JudgeResponseError, match="Thoughts and Status"):
         TrajectoryJudge(lambda _system, _prompt: "Status: success").judge(

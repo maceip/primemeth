@@ -11,6 +11,7 @@ from local_memory.prompts_reasoning_bank import (
     AUTOEVAL_TRAJECTORY_JUDGE_PROMPT,
     AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT,
 )
+from middleware.terminal_outcome import TerminalOutcome
 
 JudgeVerdict = Literal["success", "failure"]
 ModelCallable = Callable[[str, str], str]
@@ -60,6 +61,7 @@ class TrajectoryJudge:
         response: str | None = None,
         task_state: str | None = None,
         exit_code: int | None = None,
+        terminal_outcome: TerminalOutcome | None = None,
     ) -> JudgeResult:
         if not task_query.strip():
             raise ValueError("task_query cannot be empty")
@@ -74,7 +76,17 @@ class TrajectoryJudge:
         prompt += (
             "\n\nNative execution priors (context only, not the verdict):\n"
             f"Task state: {task_state if task_state is not None else 'unknown'}\n"
-            f"Exit code: {exit_code if exit_code is not None else 'unknown'}"
+            f"Exit code: {exit_code if exit_code is not None else 'unknown'}\n"
+            + (
+                "Terminal outcome: unknown"
+                if terminal_outcome is None
+                else (
+                    f"Terminal reward: {terminal_outcome.reward}\n"
+                    "Terminal reason: "
+                    f"{terminal_outcome.termination_reason.value}\n"
+                    f"Terminal evidence: {terminal_outcome.evidence.uri}"
+                )
+            )
         )
         raw_response = self.model_call(AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT, prompt)
         verdict, thoughts = parse_judge_response(raw_response)

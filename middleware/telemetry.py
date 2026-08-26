@@ -8,10 +8,13 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
+from middleware.terminal_outcome import TerminalOutcome
+
 TELEMETRY_SCHEMA_VERSION = 1
 TELEMETRY_KINDS = {
     "session.start",
     "session.shutdown",
+    "session.outcome",
     "turn",
     "tool",
     "provider",
@@ -292,6 +295,7 @@ class TelemetryEvent:
     tool: ToolExchange | None
     provider: ProviderExchange | None
     budget: BudgetSnapshot | None
+    outcome: TerminalOutcome | None
     transcript: TranscriptPointer | None
     error_class: str | None
     data: dict[str, object] | None
@@ -314,6 +318,7 @@ class TelemetryEvent:
             "tool",
             "provider",
             "budget",
+            "outcome",
             "transcript",
             "errorClass",
             "data",
@@ -370,6 +375,11 @@ class TelemetryEvent:
                 if "budget" in mapping
                 else None
             ),
+            outcome=(
+                _terminal_outcome(mapping["outcome"])
+                if "outcome" in mapping
+                else None
+            ),
             transcript=(
                 TranscriptPointer.from_mapping(mapping["transcript"])
                 if "transcript" in mapping
@@ -384,6 +394,14 @@ class TelemetryEvent:
             raise TelemetryValidationError("provider event requires provider details")
         if event.kind == "budget" and event.budget is None:
             raise TelemetryValidationError("budget event requires a budget snapshot")
+        if event.kind == "session.outcome" and event.outcome is None:
+            raise TelemetryValidationError(
+                "session.outcome event requires a terminal outcome"
+            )
+        if event.kind != "session.outcome" and event.outcome is not None:
+            raise TelemetryValidationError(
+                "only session.outcome events may contain a terminal outcome"
+            )
         return event
 
     @classmethod
@@ -405,6 +423,7 @@ class TelemetryValidation:
 
 def validate_telemetry_file(path: Path) -> TelemetryValidation:
     counts: dict[str, int] = {}
+    terminal_sessions: set[str] = set()
     events = 0
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
@@ -423,7 +442,51 @@ def validate_telemetry_file(path: Path) -> TelemetryValidation:
                     f"got {event.sequence}"
                 )
             counts[event.session_id] = event.sequence
+            if event.kind == "session.outcome":
+                if event.session_id in terminal_sessions:
+                    raise TelemetryValidationError(
+                        f"{path}:{line_number}: session has multiple terminal outcomes"
+                    )
+                terminal_sessions.add(event.session_id)
             events += 1
     if events == 0:
         raise TelemetryValidationError(f"{path}: contains no telemetry events")
     return TelemetryValidation(events=events, sessions=tuple(sorted(counts)))
+
+
+def load_terminal_outcome(directory: Path, session_id: str) -> TerminalOutcome | None:
+    """Return the sole validated terminal outcome for a session, if present."""
+    safe_session_id = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in session_id
+    )
+    path = directory / f"{safe_session_id}.jsonl"
+    if not path.exists():
+        return None
+    validate_telemetry_file(path)
+    found: TerminalOutcome | None = None
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                event = TelemetryEvent.from_json_line(line)
+            except TelemetryValidationError as error:
+                raise TelemetryValidationError(
+                    f"{path}:{line_number}: {error}"
+                ) from error
+            if event.session_id != session_id or event.kind != "session.outcome":
+                continue
+            if found is not None:
+                raise TelemetryValidationError(
+                    f"{path}:{line_number}: session has multiple terminal outcomes"
+                )
+            found = event.outcome
+    return found
+
+
+def _terminal_outcome(value: object) -> TerminalOutcome:
+    try:
+        return TerminalOutcome.from_mapping(value)
+    except ValueError as error:
+        raise TelemetryValidationError(str(error)) from error
