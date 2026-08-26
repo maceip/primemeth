@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from local_memory.observation_redactor import DEFAULT_MAX_TRAJECTORY_TOKENS
+
 
 class SynthConfigError(ValueError):
     """Raised when synth.json cannot be used safely by the Python control plane."""
@@ -37,6 +39,7 @@ class MemorySettings:
     database_path: Path
     embed_model: str
     judge_model: str
+    max_trajectory_tokens: int = DEFAULT_MAX_TRAJECTORY_TOKENS
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +82,15 @@ _TOP_LEVEL_KEYS = {
 _ENDPOINT_REQUIRED_KEYS = {"baseUrl", "model", "smallModel", "apiKeyEnv"}
 _ENDPOINT_OPTIONAL_KEYS = {"api"}
 _TELEMETRY_KEYS = {"dir"}
-_MEMORY_KEYS = {"enabled", "k", "minScore", "db", "embedModel", "judgeModel"}
+_MEMORY_REQUIRED_KEYS = {
+    "enabled",
+    "k",
+    "minScore",
+    "db",
+    "embedModel",
+    "judgeModel",
+}
+_MEMORY_OPTIONAL_KEYS = {"maxTrajectoryTokens"}
 _VERIFIER_KEYS = {"interactive", "batch", "maxCycles", "contGen"}
 _CONTINUE_GENERATION_KEYS = {"enabled", "minBudgetFrac"}
 _SKILL_COMPILER_KEYS = {"enabled", "maxPerSession", "quarantine"}
@@ -195,9 +206,17 @@ def _memory(workspace: Path, value: object | None) -> MemorySettings:
             database_path=resolve_data_plane_path(workspace, ".synth/synth.db"),
             embed_model="BAAI/bge-small-en-v1.5",
             judge_model="small",
+            max_trajectory_tokens=DEFAULT_MAX_TRAJECTORY_TOKENS,
         )
     mapping = _object(value, "memory")
-    _exact_keys(mapping, _MEMORY_KEYS, "memory")
+    missing = _MEMORY_REQUIRED_KEYS - set(mapping)
+    extra = set(mapping) - _MEMORY_REQUIRED_KEYS - _MEMORY_OPTIONAL_KEYS
+    if missing:
+        raise SynthConfigError(f"memory is missing: {', '.join(sorted(missing))}")
+    if extra:
+        raise SynthConfigError(
+            f"memory has unexpected fields: {', '.join(sorted(extra))}"
+        )
     database = _string(mapping["db"], "memory.db")
     return MemorySettings(
         enabled=_boolean(mapping["enabled"], "memory.enabled"),
@@ -208,6 +227,15 @@ def _memory(workspace: Path, value: object | None) -> MemorySettings:
         database_path=resolve_data_plane_path(workspace, database),
         embed_model=_string(mapping["embedModel"], "memory.embedModel"),
         judge_model=_string(mapping["judgeModel"], "memory.judgeModel"),
+        max_trajectory_tokens=_integer(
+            mapping.get(
+                "maxTrajectoryTokens",
+                DEFAULT_MAX_TRAJECTORY_TOKENS,
+            ),
+            "memory.maxTrajectoryTokens",
+            minimum=1_000,
+            maximum=200_000,
+        ),
     )
 
 

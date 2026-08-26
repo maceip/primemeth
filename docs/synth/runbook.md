@@ -145,6 +145,8 @@ uv run --project . --no-sync synth distill \
 
 `distill` also accepts a session directory for batch processing. Normal shutdown schedules distillation as a detached job and never blocks agent exit. The judge uses native task state and exit code only as priors; its local-model trajectory judgment determines success or failure extraction.
 
+Before ReasoningBank judgment or distillation, Synth condenses tool observations longer than 200 lines: it retains the first 50 and last 150 lines and reinserts bounded process exit, stack-frame, and terminal-exception evidence found in the omitted middle. `memory.maxTrajectoryTokens` then caps the combined trajectory portion of each memory prompt using a conservative UTF-8 byte-per-token upper bound. This is deterministic, invokes no model, and intentionally does not add a judge-model tokenizer.
+
 Retrieved strategies appear under `## Lessons from past sessions`. Contrastive meta-heuristics appear separately under `## Problem framing`. ReasoningBank does not write into native HarnessState.
 
 Run memory-aware test-time scaling against the configured local or explicitly opted-in live endpoint:

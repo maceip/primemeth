@@ -7,6 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from local_memory.observation_redactor import (
+    DEFAULT_MAX_TRAJECTORY_TOKENS,
+    cap_trajectory_for_prompt,
+)
 from local_memory.prompts_reasoning_bank import (
     AUTOEVAL_TRAJECTORY_JUDGE_PROMPT,
     AUTOEVAL_TRAJECTORY_JUDGE_SYSTEM_PROMPT,
@@ -49,8 +53,14 @@ def parse_judge_response(response: str) -> tuple[JudgeVerdict, str]:
 class TrajectoryJudge:
     """Judge observed evidence; native execution priors remain prompt context only."""
 
-    def __init__(self, model_call: ModelCallable) -> None:
+    def __init__(
+        self,
+        model_call: ModelCallable,
+        *,
+        max_trajectory_tokens: int = DEFAULT_MAX_TRAJECTORY_TOKENS,
+    ) -> None:
         self.model_call = model_call
+        self.max_trajectory_tokens = max_trajectory_tokens
 
     def judge(
         self,
@@ -67,9 +77,13 @@ class TrajectoryJudge:
             raise ValueError("task_query cannot be empty")
         if not trajectory.strip():
             raise ValueError("trajectory cannot be empty")
+        prompt_trajectory = cap_trajectory_for_prompt(
+            trajectory,
+            max_tokens=self.max_trajectory_tokens,
+        )
         prompt = AUTOEVAL_TRAJECTORY_JUDGE_PROMPT.format(
             intent=task_query.strip(),
-            last_actions=trajectory.strip(),
+            last_actions=prompt_trajectory,
             cap=final_state.strip() or "N/A",
             response=response.strip() if response and response.strip() else "N/A",
         )

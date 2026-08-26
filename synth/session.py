@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from local_memory.observation_redactor import redact_tool_observation
+
 _BUDGET_BLOCK_RE = re.compile(r"\n?<budget>.*?</budget>\n?", re.DOTALL)
 _BUDGET_STATUS_RE = re.compile(r"\n?\[Budget:.*?\| Regime: [A-Z]+\]\n?")
 _STABLE_INTERVAL_SECONDS = 0.05
@@ -123,7 +125,9 @@ def _active_branch(entries: list[dict[str, object]]) -> list[dict[str, object]]:
     return list(reversed(reversed_branch))
 
 
-def _render_message(entry: dict[str, object]) -> tuple[str, str] | None:
+def _render_message(
+    entry: dict[str, object], *, redact_observations: bool
+) -> tuple[str, str] | None:
     message = entry.get("message")
     if not isinstance(message, dict):
         return None
@@ -135,10 +139,18 @@ def _render_message(entry: dict[str, object]) -> tuple[str, str] | None:
         command = value.get("command")
         output = value.get("output")
         exit_code = value.get("exitCode")
-        text = f"Command: {command}\nExit code: {exit_code}\nOutput:\n{output}"
+        normalized_output = strip_budget_context(str(output))
+        if redact_observations:
+            normalized_output = redact_tool_observation(normalized_output)
+        text = (
+            f"Command: {command}\nExit code: {exit_code}\nOutput:\n"
+            f"{normalized_output}"
+        )
     else:
         text = _text_content(value.get("content"))
     normalized = strip_budget_context(text)
+    if role == "toolResult" and redact_observations:
+        normalized = redact_tool_observation(normalized)
     if not normalized:
         return None
     label = {
@@ -152,7 +164,10 @@ def _render_message(entry: dict[str, object]) -> tuple[str, str] | None:
 
 
 def load_session_trajectory(
-    path: Path, *, wait_for_stability: bool = False
+    path: Path,
+    *,
+    wait_for_stability: bool = False,
+    redact_observations: bool = False,
 ) -> SessionTrajectory:
     resolved = path.expanduser().resolve()
     if wait_for_stability:
@@ -195,7 +210,10 @@ def load_session_trajectory(
     for entry in branch:
         entry_type = entry.get("type")
         if entry_type == "message":
-            rendered = _render_message(entry)
+            rendered = _render_message(
+                entry,
+                redact_observations=redact_observations,
+            )
             if rendered is None:
                 continue
             role, text = rendered

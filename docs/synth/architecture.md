@@ -51,7 +51,7 @@ There are exactly two product entry points:
 3. Before model execution, BATS contributes the regime playbook and persistent plan discipline. The context hook carries the initial and current `<budget>` blocks, applies old-observation elision, and preserves native transcript entries as the source of truth.
 4. Every tool call passes through the data-plane write guard and the per-tool budget gate. Every tool result receives updated budget state. Native provider usage supplies token, cache, and cost accounting; Synth has no second tokenizer.
 5. When an agent concludes, the strategic verifier can return `SUCCESS`, `CONTINUE`, or `PIVOT`. Interactive verification is opt-in; Synth batch mode enables it by default and persists the decision before following guidance.
-6. At shutdown, ReasoningBank distillation is detached and non-blocking. Native task state and process exit status are judge priors, never the sole correctness signal.
+6. At shutdown, ReasoningBank distillation is detached and non-blocking. Its Python prompt path deterministically condenses long tool observations while retaining head, tail, process exits, stack frames, and terminal exceptions, then applies the configured conservative trajectory ceiling. Native task state and process exit status are judge priors, never the sole correctness signal.
 
 All session telemetry points back to the native v3 transcript by session file and entry identifier. Telemetry is an append-only operational index, not a replacement transcript.
 

@@ -26,6 +26,7 @@ Synth reads one project-level `synth.json`. If the file is absent, the extension
 | `memory.db` | string | when memory is present | `".synth/synth.db"` | min length 1 | SQLite database path inside .synth. |
 | `memory.embedModel` | string | when memory is present | `"BAAI/bge-small-en-v1.5"` | min length 1 | Pinned FastEmbed model identifier. |
 | `memory.judgeModel` | string | when memory is present | `"small"` | min length 1 | Endpoint model selector used by the trajectory judge. |
+| `memory.maxTrajectoryTokens` | integer | no | `64000` | min 1000, max 200000 | Conservative tokenizer-free trajectory ceiling for ReasoningBank judge and distillation prompts. |
 | `verifier.interactive` | boolean | when verifier is present | `false` | none | Run strategic verification in interactive sessions. |
 | `verifier.batch` | boolean | when verifier is present | `true` | none | Run strategic verification in Synth batch sessions. |
 | `verifier.maxCycles` | integer | when verifier is present | `2` | min 0, max 10 | Maximum CONTINUE or PIVOT guidance cycles. |

@@ -7,6 +7,10 @@ from dataclasses import dataclass
 
 from local_memory.dedup import DedupResult, MemoryDeduplicator
 from local_memory.judge import JudgeVerdict, ModelCallable
+from local_memory.observation_redactor import (
+    DEFAULT_MAX_TRAJECTORY_TOKENS,
+    cap_trajectory_for_prompt,
+)
 from local_memory.prompts_reasoning_bank import (
     FAILED_SI,
     MAX_MEMORY_ITEMS,
@@ -51,6 +55,7 @@ def build_extraction_prompt(
     trajectory: str,
     verdict: JudgeVerdict,
     judge_reasoning: str | None = None,
+    max_trajectory_tokens: int = DEFAULT_MAX_TRAJECTORY_TOKENS,
 ) -> tuple[str, str]:
     if not task_query.strip():
         raise ValueError("task_query cannot be empty")
@@ -59,7 +64,11 @@ def build_extraction_prompt(
     if verdict not in ("success", "failure"):
         raise ValueError(f"unsupported judge verdict: {verdict}")
     system_prompt = SUCCESSFUL_SI if verdict == "success" else FAILED_SI
-    prompt = f"**Query:** {task_query.strip()}\n\n**Trajectory:**\n{trajectory.strip()}"
+    prompt_trajectory = cap_trajectory_for_prompt(
+        trajectory,
+        max_tokens=max_trajectory_tokens,
+    )
+    prompt = f"**Query:** {task_query.strip()}\n\n**Trajectory:**\n{prompt_trajectory}"
     if judge_reasoning and judge_reasoning.strip():
         status_label = "succeeded" if verdict == "success" else "failed"
         prompt += f"\n\nThe task {status_label} because: {judge_reasoning.strip()}"
@@ -106,9 +115,12 @@ class MemoryDistiller:
         self,
         model_call: ModelCallable,
         deduplicator: MemoryDeduplicator,
+        *,
+        max_trajectory_tokens: int = DEFAULT_MAX_TRAJECTORY_TOKENS,
     ) -> None:
         self.model_call = model_call
         self.deduplicator = deduplicator
+        self.max_trajectory_tokens = max_trajectory_tokens
 
     def distill(
         self,
@@ -128,6 +140,7 @@ class MemoryDistiller:
             trajectory=trajectory,
             verdict=verdict,
             judge_reasoning=judge_reasoning,
+            max_trajectory_tokens=self.max_trajectory_tokens,
         )
         raw_response = self.model_call(system_prompt, prompt)
         parsed = parse_memory_response(raw_response)

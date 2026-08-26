@@ -10,6 +10,7 @@ from local_memory.dedup import DedupResult, MemoryDeduplicator
 from local_memory.distill import MemoryDistiller, parse_memory_response
 from local_memory.embedder import LocalEmbedder
 from local_memory.judge import JudgeResult, ModelCallable, TrajectoryJudge
+from local_memory.observation_redactor import cap_trajectory_for_prompt
 from local_memory.prompts_reasoning_bank import (
     MAX_META_HEURISTICS,
     META_HEURISTIC_CONTRAST_SI,
@@ -87,9 +88,13 @@ def _contrast_meta_heuristic(
     )
     if successful is None:
         return MetaHeuristicResult((), (), None)
+    prompt_trajectory = cap_trajectory_for_prompt(
+        judged.trajectory.trajectory,
+        max_tokens=judged.settings.memory.max_trajectory_tokens,
+    )
     prompt = (
         f"**Failed Query:** {judged.trajectory.task_query}\n\n"
-        f"**Failed Trajectory:**\n{judged.trajectory.trajectory}\n\n"
+        f"**Failed Trajectory:**\n{prompt_trajectory}\n\n"
         "**Retrieved Similar Successful Task:**\n"
         f"{successful.item.task_query}\n\n"
         "**Retrieved Successful Memory Evidence (not a full trajectory):**\n"
@@ -138,7 +143,9 @@ def judge_session(
     wait_for_stability: bool = False,
 ) -> JudgedSession:
     trajectory = load_session_trajectory(
-        session_path, wait_for_stability=wait_for_stability
+        session_path,
+        wait_for_stability=wait_for_stability,
+        redact_observations=True,
     )
     settings = load_synth_settings(trajectory.workspace)
     if settings.kill_switch:
@@ -147,7 +154,10 @@ def judge_session(
     terminal_outcome = load_terminal_outcome(
         settings.telemetry.directory, trajectory.session_id
     )
-    result = TrajectoryJudge(model_call).judge(
+    result = TrajectoryJudge(
+        model_call,
+        max_trajectory_tokens=settings.memory.max_trajectory_tokens,
+    ).judge(
         task_query=trajectory.task_query,
         trajectory=trajectory.trajectory,
         final_state=trajectory.final_state,
@@ -193,6 +203,7 @@ def distill_session(
         result = MemoryDistiller(
             model_call,
             deduplicator,
+            max_trajectory_tokens=settings.memory.max_trajectory_tokens,
         ).distill(
             task_query=judged.trajectory.task_query,
             trajectory=judged.trajectory.trajectory,

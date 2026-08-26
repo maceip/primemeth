@@ -11,15 +11,35 @@ from tempfile import TemporaryDirectory
 from local_memory.dedup import MemoryDeduplicator
 from local_memory.distill import MemoryDistiller
 from local_memory.embedder import EmbeddingBatch
+from local_memory.observation_redactor import (
+    conservative_token_upper_bound,
+    redact_tool_observation,
+)
 from local_memory.prompts_reasoning_bank import FAILED_SI
 from local_memory.retrieval import MemoryRetriever
 from local_memory.store import MemoryStore
 
 _DEMO_DIMENSION = 32
-_FAILURE_TRAJECTORY = """1. Tried to open the SQLite database.
-2. Created the vector table before loading the sqlite-vec extension.
-3. SQLite rejected vec0 with 'no such module', and the session exited without retrying.
-"""
+_DEMO_MAX_TRAJECTORY_TOKENS = 8_000
+_DEMO_EXCEPTION = "RuntimeError: no such module vec0 — REDACTION_DEMO_SENTINEL"
+
+
+def _failure_trajectory() -> str:
+    lines = [f"fixture-log-{index:04d}-" + ("x" * 60) for index in range(5_000)]
+    lines[2_497] = "Traceback (most recent call last):"
+    lines[2_498] = '  File "/workspace/store.py", line 42, in initialize'
+    lines[2_499] = _DEMO_EXCEPTION
+    lines[2_600] = "Exit code: 1"
+    observation = redact_tool_observation("\n".join(lines))
+    return (
+        "1. Tried to open the SQLite database.\n"
+        "2. Created the vector table before loading the sqlite-vec extension.\n"
+        f"3. Tool result:\n{observation}\n"
+        "4. The session exited without retrying."
+    )
+
+
+_FAILURE_TRAJECTORY = _failure_trajectory()
 
 
 class DeterministicFixtureEmbedder:
@@ -34,7 +54,12 @@ class DeterministicFixtureEmbedder:
 
 
 def fixture_model(system_prompt: str, prompt: str) -> str:
-    if system_prompt != FAILED_SI or "no such module" not in prompt:
+    if (
+        system_prompt != FAILED_SI
+        or _DEMO_EXCEPTION not in prompt
+        or "Exit code: 1" not in prompt
+        or "<trajectory_omitted" not in prompt
+    ):
         raise ValueError("fixture received an unexpected extraction prompt")
     return (
         "# Memory Item 1\n"
@@ -58,6 +83,7 @@ def main() -> None:
         distiller = MemoryDistiller(
             fixture_model,
             MemoryDeduplicator(store, threshold=0.95),
+            max_trajectory_tokens=_DEMO_MAX_TRAJECTORY_TOKENS,
         )
         distilled = distiller.distill(
             task_query="Fix a SQLite vector store that reports no such module vec0",
@@ -73,6 +99,12 @@ def main() -> None:
         print(
             f"distilled={distilled.inserted_count} "
             f"parse_errors={len(distilled.parse_errors)}"
+        )
+        if _DEMO_EXCEPTION not in distilled.prompt:
+            raise RuntimeError("redacted terminal exception was absent from prompt")
+        print(
+            "redacted_log_lines=5000 terminal_exception=preserved "
+            f"prompt_token_upper_bound={conservative_token_upper_bound(distilled.prompt)}"
         )
         print(f"retrieved={len(retrieved)}")
         for result in retrieved:

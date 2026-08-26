@@ -22,6 +22,7 @@ from local_memory.judge import (
     TrajectoryJudge,
     parse_judge_response,
 )
+from local_memory.observation_redactor import cap_trajectory_for_prompt
 from local_memory.prompts_reasoning_bank import (
     MATTS_CONTRASTIVE_SCALING_SI,
     MATTS_MAX_MEMORY_ITEMS,
@@ -133,8 +134,16 @@ def run_matts(
         else None
     )
     model_call = configured_model_callable(settings, resolved_fixture)
-    judged = _sequentially_reverify(trajectories, model_call)
-    contrast_prompt = _contrast_prompt(normalized_task, judged)
+    judged = _sequentially_reverify(
+        trajectories,
+        model_call,
+        max_trajectory_tokens=settings.memory.max_trajectory_tokens,
+    )
+    contrast_prompt = _contrast_prompt(
+        normalized_task,
+        judged,
+        max_trajectory_tokens=settings.memory.max_trajectory_tokens,
+    )
     contrast_response = model_call(MATTS_CONTRASTIVE_SCALING_SI, contrast_prompt)
     parsed = parse_memory_response(contrast_response, max_items=MATTS_MAX_MEMORY_ITEMS)
     if not parsed.items:
@@ -307,12 +316,21 @@ def _run_parallel_trajectory(
 
 
 def _sequentially_reverify(
-    artifacts: tuple[ParallelTrajectory, ...], model_call: ModelCallable
+    artifacts: tuple[ParallelTrajectory, ...],
+    model_call: ModelCallable,
+    *,
+    max_trajectory_tokens: int,
 ) -> tuple[ReverifiedTrajectory, ...]:
-    judge = TrajectoryJudge(model_call)
+    judge = TrajectoryJudge(
+        model_call,
+        max_trajectory_tokens=max_trajectory_tokens,
+    )
     results: list[ReverifiedTrajectory] = []
     for artifact in artifacts:
-        trajectory = load_session_trajectory(artifact.session_path)
+        trajectory = load_session_trajectory(
+            artifact.session_path,
+            redact_observations=True,
+        )
         initial = judge.judge(
             task_query=trajectory.task_query,
             trajectory=trajectory.trajectory,
@@ -322,7 +340,12 @@ def _sequentially_reverify(
             exit_code=artifact.exit_code,
             terminal_outcome=artifact.terminal_outcome,
         )
-        reverified = _reverify(trajectory, initial, model_call)
+        reverified = _reverify(
+            trajectory,
+            initial,
+            model_call,
+            max_trajectory_tokens=max_trajectory_tokens,
+        )
         results.append(
             ReverifiedTrajectory(
                 artifact=artifact,
@@ -338,10 +361,16 @@ def _reverify(
     trajectory: SessionTrajectory,
     initial: JudgeResult,
     model_call: ModelCallable,
+    *,
+    max_trajectory_tokens: int,
 ) -> JudgeResult:
+    prompt_trajectory = cap_trajectory_for_prompt(
+        trajectory.trajectory,
+        max_tokens=max_trajectory_tokens,
+    )
     prompt = (
         f"**Task:** {trajectory.task_query}\n\n"
-        f"**Trajectory:**\n{trajectory.trajectory}\n\n"
+        f"**Trajectory:**\n{prompt_trajectory}\n\n"
         f"**Initial Judgment:**\n{initial.raw_response}"
     )
     raw_response = model_call(MATTS_SEQUENTIAL_REVERIFY_SI, prompt)
@@ -354,11 +383,24 @@ def _reverify(
     )
 
 
-def _contrast_prompt(task: str, trajectories: tuple[ReverifiedTrajectory, ...]) -> str:
+def _contrast_prompt(
+    task: str,
+    trajectories: tuple[ReverifiedTrajectory, ...],
+    *,
+    max_trajectory_tokens: int,
+) -> str:
     rendered = MATTS_SCALING_QUERY_FORMAT.format(query=task)
+    per_trajectory_tokens = max(
+        1,
+        max_trajectory_tokens // max(1, len(trajectories)),
+    )
     for item in trajectories:
+        prompt_trajectory = cap_trajectory_for_prompt(
+            item.trajectory.trajectory,
+            max_tokens=per_trajectory_tokens,
+        )
         steps = (
-            f"{item.trajectory.trajectory}\n\n"
+            f"{prompt_trajectory}\n\n"
             f"**Initial Judgment:** {item.initial.verdict}\n"
             f"{item.initial.thoughts}\n\n"
             f"**Sequential Re-verification:** {item.reverified.verdict}\n"

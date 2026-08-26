@@ -420,7 +420,7 @@ printf -v demo_tui_command '%q ' \
 	--no-session
 demo_tui_command+='; demo_tui_exit_code=$?; printf '\''\n%s:%s\n'\'' '\''__SYNTH_DEMO_TUI_EXIT__'\'' "${demo_tui_exit_code}"'
 
-demo_tui_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${demo_tui_session}" -c "${synth_root}" -x 80 -y 24 /bin/bash --noprofile --norc)"
+demo_tui_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${demo_tui_session}" -c "${synth_root}" -x 80 -y 48 /bin/bash --noprofile --norc)"
 demo_tui_owned=1
 demo_tui_started=1
 tmux send-keys -t "${demo_tui_pane}" -l "${demo_tui_command}"
@@ -889,6 +889,17 @@ printf 'synth-demo: Phase 3 BATS transcript and mirrored telemetry PASS\n'
 	"${tsx_path}" "${phase4_driver_path}"
 )
 printf 'synth-demo: Phase 4 two-session ReasoningBank loop PASS\n'
+
+memory_redaction_output="$(
+	cd "${synth_root}"
+	uv run --project . --no-sync python -m local_memory.demo
+)"
+printf '%s\n' "${memory_redaction_output}"
+if ! grep -q 'redacted_log_lines=5000 terminal_exception=preserved' <<<"${memory_redaction_output}"; then
+	printf 'synth-demo: Phase 4 observation redaction proof omitted terminal evidence\n' >&2
+	exit 1
+fi
+printf 'synth-demo: Phase 4 5000-line observation redaction PASS\n'
 
 (
 	cd "${synth_root}"

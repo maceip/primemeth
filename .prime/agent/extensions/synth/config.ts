@@ -93,6 +93,14 @@ const MemorySchema = Type.Object(
 		db: Type.String({ minLength: 1, description: "SQLite database path inside .synth." }),
 		embedModel: Type.String({ minLength: 1, description: "Pinned FastEmbed model identifier." }),
 		judgeModel: Type.String({ minLength: 1, description: "Endpoint model selector used by the trajectory judge." }),
+		maxTrajectoryTokens: Type.Optional(
+			Type.Integer({
+				minimum: 1_000,
+				maximum: 200_000,
+				description:
+					"Conservative tokenizer-free trajectory ceiling for ReasoningBank judge and distillation prompts.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -161,11 +169,15 @@ export interface SynthEndpointConfig {
 	api: SynthEndpointApi;
 }
 
+export type SynthMemoryConfig = Omit<Static<typeof MemorySchema>, "maxTrajectoryTokens"> & {
+	maxTrajectoryTokens: number;
+};
+
 export interface SynthConfig {
 	endpoint?: SynthEndpointConfig;
 	telemetry: Static<typeof TelemetryConfigSchema>;
 	budgets: SynthBudgetConfig;
-	memory: Static<typeof MemorySchema>;
+	memory: SynthMemoryConfig;
 	verifier: Static<typeof VerifierSchema>;
 	optimizer: Static<typeof OptimizerSchema>;
 	skillCompiler: Static<typeof SkillCompilerSchema>;
@@ -198,6 +210,7 @@ export const SYNTH_CONFIG_DEFAULTS: Omit<SynthConfig, "endpoint"> = {
 		db: ".synth/synth.db",
 		embedModel: "BAAI/bge-small-en-v1.5",
 		judgeModel: "small",
+		maxTrajectoryTokens: 64_000,
 	},
 	verifier: {
 		interactive: false,
@@ -231,7 +244,7 @@ function normalizeConfig(cwd: string, value: SynthConfigFile): SynthConfig {
 			: {}),
 		telemetry: value.telemetry ?? SYNTH_CONFIG_DEFAULTS.telemetry,
 		budgets: { ...SYNTH_CONFIG_DEFAULTS.budgets, ...value.budgets },
-		memory: value.memory ?? SYNTH_CONFIG_DEFAULTS.memory,
+		memory: { ...SYNTH_CONFIG_DEFAULTS.memory, ...value.memory },
 		verifier: value.verifier ?? SYNTH_CONFIG_DEFAULTS.verifier,
 		optimizer: value.optimizer ?? SYNTH_CONFIG_DEFAULTS.optimizer,
 		skillCompiler: value.skillCompiler ?? SYNTH_CONFIG_DEFAULTS.skillCompiler,
