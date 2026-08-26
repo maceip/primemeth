@@ -141,8 +141,23 @@ printf -v proof_command '%q ' \
 	--no-session
 proof_command+='; proof_tui_exit_code=$?; printf '\''\n%s:%s\n'\'' '\''__SYNTH_TUI_EXIT__'\'' "${proof_tui_exit_code}"'
 
-proof_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${proof_session}" -c "${repo_root}" -x 80 -y 48 /bin/bash --noprofile --norc)"
+proof_shell_ready="__SYNTH_PROOF_SHELL_READY__"
+proof_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "${proof_session}" -c "${repo_root}" -x 80 -y 48 /usr/bin/env "PS1=${proof_shell_ready} " /bin/bash --noprofile --norc)"
 proof_session_owned=1
+proof_shell_started=0
+for ((proof_attempt = 0; proof_attempt < 40; proof_attempt++)); do
+	proof_capture="$(tmux capture-pane -t "${proof_pane}" -p -S -)"
+	if grep -Fq "${proof_shell_ready}" <<<"${proof_capture}"; then
+		proof_shell_started=1
+		break
+	fi
+	sleep 0.05
+done
+if [[ "${proof_shell_started}" -ne 1 ]]; then
+	printf '%s\n' "${proof_capture}" >&2
+	printf 'proof-faux-tui: private shell did not become ready\n' >&2
+	exit 1
+fi
 tmux send-keys -t "${proof_pane}" -l "${proof_command}"
 tmux send-keys -t "${proof_pane}" Enter
 
