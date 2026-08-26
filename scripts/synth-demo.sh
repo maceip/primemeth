@@ -435,7 +435,8 @@ for ((demo_attempt = 0; demo_attempt < 240; demo_attempt++)); do
 	demo_tui_capture="$(tmux capture-pane -t "${demo_tui_pane}" -p -S -)"
 	if grep -Eq 'version[[:space:]]+v[0-9]+' <<<"${demo_tui_capture}" && \
 		grep -Eq 'model[[:space:]]+local-main' <<<"${demo_tui_capture}" && \
-		grep -Eq 'cwd[[:space:]]+.*synth' <<<"${demo_tui_capture}"; then
+		grep -Eq 'cwd[[:space:]]+.*synth' <<<"${demo_tui_capture}" && \
+		grep -Fq '+-------------------------------------------------------------------+' <<<"${demo_tui_capture}"; then
 		demo_tui_ready=1
 		break
 	fi
