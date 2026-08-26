@@ -39,6 +39,20 @@ from synth.ports import prompt_port_manifest
 from synth.protocol import JsonObject, JsonValue
 from synth.reasoning_bank import ReasoningBankError, distill_path, judge_session
 from synth.service import PROTOCOL_VERSION, BridgeService, ServiceError
+from synth.serving import (
+    DEVICE_NAMES,
+    ENGINE_NAMES,
+    QUANTIZATIONS,
+    DeviceName,
+    EngineName,
+    Quantization,
+    ServeRequest,
+    ServingError,
+    serve_status,
+    setup_engine,
+    start_server,
+    stop_server,
+)
 from synth.session import SessionParseError
 
 _REVIEWED_ENGINE_ENTRYPOINTS = (_memory_demo_main, _run_batch, _select_candidates)
@@ -64,6 +78,30 @@ def _parser() -> argparse.ArgumentParser:
 
     commands.add_parser("ports", help="show the research prompt integrity manifest")
     commands.add_parser("optimize", help="run the AutoSaddler outer loop")
+
+    engine = commands.add_parser("engine", help="prepare dedicated serving engines")
+    engine_commands = engine.add_subparsers(dest="engine_command", required=True)
+    engine_setup = engine_commands.add_parser(
+        "setup", help="create or update a serving engine environment"
+    )
+    engine_setup.add_argument("engine", choices=ENGINE_NAMES)
+
+    serve = commands.add_parser("serve", help="manage local model servers")
+    serve_commands = serve.add_subparsers(dest="serve_command", required=True)
+    serve_start = serve_commands.add_parser("start", help="start a local model server")
+    serve_start.add_argument("--engine", choices=ENGINE_NAMES, required=True)
+    serve_start.add_argument("--model", required=True)
+    serve_start.add_argument("--quantize", choices=QUANTIZATIONS)
+    serve_start.add_argument("--device", choices=DEVICE_NAMES, default="mps")
+    serve_start.add_argument("--port", type=int, default=8000)
+    serve_start.add_argument("--startup-timeout-seconds", type=float, default=900.0)
+    serve_start.add_argument("--served-model-name")
+    serve_stop = serve_commands.add_parser("stop", help="stop a local model server")
+    serve_stop.add_argument("--engine")
+    serve_status_parser = serve_commands.add_parser(
+        "status", help="show local model server state"
+    )
+    serve_status_parser.add_argument("--engine")
 
     run = commands.add_parser("run", help="run a coding task through Synth")
     run.add_argument("--task", required=True, help="task text or a task-spec path")
@@ -208,6 +246,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if command == "ports":
             _write_json(prompt_port_manifest())
             return 0
+        if command == "engine":
+            engine_command = cast(str, args.engine_command)
+            if engine_command != "setup":
+                raise ValueError(f"unknown engine command: {engine_command}")
+            _write_json(setup_engine(cast(EngineName, args.engine)))
+            return 0
+        if command == "serve":
+            serve_command = cast(str, args.serve_command)
+            if serve_command == "start":
+                _write_json(
+                    start_server(
+                        Path.cwd(),
+                        ServeRequest(
+                            engine=cast(EngineName, args.engine),
+                            model=cast(str, args.model),
+                            quantization=cast(Quantization | None, args.quantize),
+                            device=cast(DeviceName, args.device),
+                            port=cast(int, args.port),
+                            startup_timeout_seconds=cast(
+                                float, args.startup_timeout_seconds
+                            ),
+                            served_model_name=cast(str | None, args.served_model_name),
+                        ),
+                    )
+                )
+                return 0
+            selected_engine = cast(str | None, args.engine)
+            if serve_command == "stop":
+                _write_json(stop_server(Path.cwd(), selected_engine))
+                return 0
+            if serve_command == "status":
+                _write_json(serve_status(Path.cwd(), selected_engine))
+                return 0
+            raise ValueError(f"unknown serve command: {serve_command}")
         if command == "run":
             if not cast(bool, args.bats):
                 raise ValueError("synth run currently requires --bats")
@@ -375,6 +447,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ServiceError,
         SessionParseError,
         SkillCompilerError,
+        ServingError,
         SynthConfigError,
         TelemetryValidationError,
         ValueError,
