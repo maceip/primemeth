@@ -211,3 +211,10 @@ Append-only journal. Each entry records a deviation, adaptation, or boundary dec
 - Alternatives: Restore `optimizer.cli:main` as a third product entry point; duplicate its parser in `synth`; mechanically reformat and type-repair the reviewed vendor snapshot; rebuild Phase 6.
 - Why: The operator supplied a fresh-clone-reviewed branch and an explicit CLI seam. Rewriting the vendor would invalidate that review and expand `PATCHES.md`, while static reachability plus adapter lint/type checks preserves the two-head law and a clean upstream comparison.
 - Affected files: `pyproject.toml`, `synth/cli.py`, `optimizer/cli.py`, `optimizer/autosaddler.py`, `scripts/check-wiring.sh`, merged `optimizer/vendor/autosaddler_v2/**`.
+
+## 2026-08-26 — D-0031: Classify the vendored Claude endpoint as an unreachable opt-in surface
+
+- Decision: Allow the exact `api.anthropic.com` literal only in AutoSaddler's preserved optional Claude provider file. The shipped Synth optimizer config uses the deterministic stub, and `optimizer.runtime` accepts only `stub` or `prime_agent`, so the generic vendor registry cannot select Claude through `synth optimize`.
+- Alternatives: Delete the optional upstream provider; weaken the classifier for the entire vendor directory; permit Claude in the Synth scenario dispatcher.
+- Why: The operator required the reviewed complete v2 vendor snapshot, while Law 3 prohibits a vendor dependency in Synth's runtime path rather than forbidding preserved opt-in source. Exact-file classification and a negative dispatcher assertion keep that distinction executable.
+- Affected files: `tests/harness_regression/test_no_vendor_hosts.py`, merged `optimizer/vendor/autosaddler_v2/providers/claude.py`, `optimizer/runtime.py`, `optimizer/configs/synth_local.yaml`.

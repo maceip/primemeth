@@ -77,6 +77,7 @@ CLASSIFIED_REMOTE_PATHS = {
     "packages/tui/src/keys.ts",
     "packages/tui/src/stdin-buffer.ts",
     "packages/tui/src/terminal.ts",
+    "optimizer/vendor/autosaddler_v2/providers/claude.py",
 }
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 URL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`<>()]+")
@@ -138,6 +139,14 @@ def test_nonlocal_urls_exist_only_in_classified_runtime_surfaces() -> None:
         "pub-728493de92a943e2a9b2d17b4719f318.r2.dev"
         in remote_hosts[version_check_path]
     )
+    claude_provider_path = "optimizer/vendor/autosaddler_v2/providers/claude.py"
+    assert remote_hosts[claude_provider_path] == {"api.anthropic.com"}
+
+    optimizer_config = (ROOT / "optimizer" / "configs" / "synth_local.yaml").read_text()
+    optimizer_runtime = (ROOT / "optimizer" / "runtime.py").read_text()
+    assert re.search(r"^provider:\n  type: stub$", optimizer_config, re.MULTILINE)
+    assert 'if provider_type == "prime_agent":' in optimizer_runtime
+    assert 'if provider_type == "claude":' not in optimizer_runtime
 
     version_check = (ROOT / version_check_path).read_text()
     offline_guard = (
