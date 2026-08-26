@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Literal, cast
@@ -22,10 +23,13 @@ DEFAULT_PORT = 8080
 DEFAULT_HOST = "127.0.0.1"
 HEALTH_TIMEOUT_SECONDS = 300.0
 YARN_CONTEXT_PROFILE = "yarn-1m"
-LocalEngineName = Literal["mlx", "llama.cpp"]
+DEFAULT_MTPLX_CHECKOUT = Path("/Users/mac/MTPLX")
+DEFAULT_MTPLX_DRAFT_DEPTH = 3
+LocalEngineName = Literal["mlx", "llama.cpp", "mtplx"]
 ContextProfile = Literal["native", "yarn-1m"]
-LOCAL_ENGINE_NAMES: tuple[LocalEngineName, ...] = ("mlx", "llama.cpp")
+LOCAL_ENGINE_NAMES: tuple[LocalEngineName, ...] = ("mlx", "llama.cpp", "mtplx")
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_GGUF_SHARD_PATTERN = re.compile(r"-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$")
 
 
 class ServeError(RuntimeError):
@@ -112,6 +116,23 @@ def _gguf_model(model: Path) -> Path:
     if not candidates:
         raise ServeError(f"no GGUF weights under {model}")
     if len(candidates) > 1:
+        shards: dict[int, Path] = {}
+        expected_total: int | None = None
+        for candidate in candidates:
+            match = _GGUF_SHARD_PATTERN.search(candidate.name)
+            if match is None:
+                break
+            part = int(match.group("part"))
+            total = int(match.group("total"))
+            if expected_total is not None and total != expected_total:
+                break
+            expected_total = total
+            shards[part] = candidate
+        else:
+            if expected_total == len(shards) and set(shards) == set(
+                range(1, expected_total + 1)
+            ):
+                return shards[1]
         raise ServeError(
             f"multiple GGUF weights found under {model}; pass an exact file path"
         )
@@ -148,6 +169,10 @@ def _llama_argv(
         "--jinja",
         "--alias",
         alias,
+        "-ctk",
+        "f16",
+        "-ctv",
+        "f16",
     ]
     if profile == YARN_CONTEXT_PROFILE:
         factor, original_context = _yarn_params(model)
@@ -166,9 +191,67 @@ def _llama_argv(
     return argv
 
 
+def _resolve_mtplx_checkout(checkout: Path | None) -> Path:
+    candidate = (checkout or DEFAULT_MTPLX_CHECKOUT).expanduser()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise ServeError(
+            f"MTPLX checkout is unavailable: {candidate}: {error}"
+        ) from error
+    if not resolved.is_dir() or not (resolved / "pyproject.toml").is_file():
+        raise ServeError(f"MTPLX checkout is invalid: {resolved}")
+    if not (resolved / "mtplx" / "cli.py").is_file():
+        raise ServeError(f"MTPLX checkout has no mtplx CLI module: {resolved}")
+    return resolved
+
+
+def _mtplx_argv(
+    checkout: Path,
+    model: Path,
+    host: str,
+    port: int,
+    alias: str,
+    draft_depth: int,
+) -> list[str]:
+    if not 0 <= draft_depth <= 8:
+        raise ServeError("--draft-depth must be between 0 (AR) and 8")
+    uv = shutil.which("uv")
+    if uv is None:
+        raise ServeError("uv is required to launch MTPLX from a checkout")
+    generation_mode = "ar" if draft_depth == 0 else "mtp"
+    return [
+        uv,
+        "run",
+        "--project",
+        str(checkout),
+        "--python",
+        "3.12",
+        "--frozen",
+        "python",
+        "-m",
+        "mtplx.cli",
+        "serve",
+        "--model",
+        str(model),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--model-id",
+        alias,
+        "--depth",
+        str(max(1, draft_depth)),
+        "--generation-mode",
+        generation_mode,
+        "--no-auth",
+        "--no-stats-footer",
+    ]
+
+
 def _resolve_model(model: Path | None) -> Path:
     if model is None:
-        raise ServeError("--model is required for mlx and llama.cpp")
+        raise ServeError("--model is required for mlx, llama.cpp, and mtplx")
     try:
         return model.expanduser().resolve(strict=True)
     except OSError as error:
@@ -223,6 +306,8 @@ def start(
     context_profile: str | None = None,
     alias: str | None = None,
     timeout_seconds: float = HEALTH_TIMEOUT_SECONDS,
+    mtplx_checkout: Path | None = None,
+    draft_depth: int = DEFAULT_MTPLX_DRAFT_DEPTH,
 ) -> dict[str, object]:
     resolved_model = _resolve_model(model)
     model_alias = alias or _default_alias(resolved_model)
@@ -255,6 +340,26 @@ def start(
                 profile,
             )
             details["contextProfile"] = profile
+        elif engine == "mtplx":
+            if context_profile not in (None, "native"):
+                raise ServeError("mtplx does not implement the yarn-1m context profile")
+            checkout = _resolve_mtplx_checkout(mtplx_checkout)
+            working_directory = checkout
+            command = _mtplx_argv(
+                checkout,
+                resolved_model,
+                host,
+                port,
+                model_alias,
+                draft_depth,
+            )
+            details.update(
+                {
+                    "checkout": str(checkout),
+                    "draftDepth": draft_depth,
+                    "generationMode": "ar" if draft_depth == 0 else "mtp",
+                }
+            )
         else:
             raise ServeError(f"unknown engine: {engine}")
     except EngineError as error:

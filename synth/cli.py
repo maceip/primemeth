@@ -25,6 +25,13 @@ from synth.batch import (
     resolve_task,
     run_bats,
 )
+from synth.bench import (
+    BenchmarkError,
+    BenchmarkRequest,
+    parse_contexts,
+    render_markdown,
+    run_benchmark,
+)
 from synth.bridge import run_bridge
 from synth.capabilities import CAPABILITIES
 from synth.config import EndpointApi, SynthConfigError, load_synth_settings
@@ -119,12 +126,41 @@ def _parser() -> argparse.ArgumentParser:
     serve_start.add_argument("--served-model-name")
     serve_start.add_argument("--host", default="127.0.0.1")
     serve_start.add_argument("--context-profile", choices=("native", "yarn-1m"))
+    serve_start.add_argument("--mtplx-checkout", type=Path)
+    serve_start.add_argument(
+        "--draft-depth",
+        type=int,
+        help="MTPLX draft depth; 0 selects autoregressive decoding",
+    )
     serve_stop = serve_commands.add_parser("stop", help="stop a local model server")
     serve_stop.add_argument("--engine")
     serve_status_parser = serve_commands.add_parser(
         "status", help="show local model server state"
     )
     serve_status_parser.add_argument("--engine")
+
+    bench = commands.add_parser(
+        "bench", help="benchmark an OpenAI-compatible endpoint by context depth"
+    )
+    bench.add_argument("--endpoint", default="http://127.0.0.1:8000/v1")
+    bench.add_argument("--model")
+    bench.add_argument("--engine", default="openai-compatible")
+    bench.add_argument("--quant", default="unknown")
+    bench.add_argument(
+        "--contexts",
+        help="comma-separated ladder subset: 4k,32k,131k,262k,1m",
+    )
+    bench.add_argument("--try-1m", action="store_true")
+    bench.add_argument("--runs", type=int, default=2)
+    bench.add_argument("--output-tokens", type=int, default=192)
+    bench.add_argument("--timeout-seconds", type=float, default=1800.0)
+    bench.add_argument("--seed", type=int, default=38)
+    bench.add_argument("--chars-per-token", type=float, default=3.2)
+    bench.add_argument("--compare-mtp", action="store_true")
+    bench.add_argument("--mtp-depth", type=int, default=3)
+    bench.add_argument("--api-key-env", default="SYNTH_LOCAL_API_KEY")
+    bench.add_argument("--tokenizer", type=Path)
+    bench.add_argument("--run-id")
 
     run = commands.add_parser("run", help="run a coding task through Synth")
     run.add_argument("--task", required=True, help="task text or a task-spec path")
@@ -290,6 +326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments[:1] == ["optimize"]:
         optimizer_main(arguments)
         return 0
+    if arguments[:1] == ["serve"] and "--engine" in arguments[1:]:
+        arguments.insert(1, "start")
     args = _parser().parse_args(arguments)
     command = cast(str, args.command)
     try:
@@ -371,6 +409,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise ValueError("--quantize is only supported by transformers")
                 if cast(DeviceName | None, args.device) is not None:
                     raise ValueError("--device is only supported by transformers")
+                mtplx_checkout = cast(Path | None, args.mtplx_checkout)
+                draft_depth = cast(int | None, args.draft_depth)
+                if selected != "mtplx" and mtplx_checkout is not None:
+                    raise ValueError("--mtplx-checkout is only supported by mtplx")
+                if selected != "mtplx" and draft_depth is not None:
+                    raise ValueError("--draft-depth is only supported by mtplx")
                 if (
                     selected == "mlx"
                     and cast(str | None, args.context_profile) is not None
@@ -381,7 +425,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         Path.cwd(),
                         engine=cast(LocalEngineName, selected),
                         model=Path(model) if model is not None else None,
-                        port=(configured_port if configured_port is not None else 8080),
+                        port=(
+                            configured_port
+                            if configured_port is not None
+                            else 8000
+                            if selected == "mtplx"
+                            else 8080
+                        ),
                         host=cast(str, args.host),
                         context_profile=cast(str | None, args.context_profile),
                         alias=cast(str | None, args.served_model_name),
@@ -390,6 +440,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             if configured_timeout is not None
                             else 300.0
                         ),
+                        mtplx_checkout=mtplx_checkout,
+                        draft_depth=draft_depth if draft_depth is not None else 3,
                     )
                 )
                 return 0
@@ -401,6 +453,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_json(serve_status(Path.cwd(), selected_engine))
                 return 0
             raise ValueError(f"unknown serve command: {serve_command}")
+        if command == "bench":
+            report = run_benchmark(
+                Path.cwd(),
+                BenchmarkRequest(
+                    endpoint=cast(str, args.endpoint),
+                    model=cast(str | None, args.model),
+                    engine=cast(str, args.engine),
+                    quant=cast(str, args.quant),
+                    contexts=parse_contexts(cast(str | None, args.contexts)),
+                    try_1m=cast(bool, args.try_1m),
+                    runs=cast(int, args.runs),
+                    output_tokens=cast(int, args.output_tokens),
+                    timeout_seconds=cast(float, args.timeout_seconds),
+                    seed=cast(int, args.seed),
+                    chars_per_token=cast(float, args.chars_per_token),
+                    compare_mtp=cast(bool, args.compare_mtp),
+                    mtp_depth=cast(int, args.mtp_depth),
+                    api_key_env=cast(str, args.api_key_env),
+                    tokenizer=cast(Path | None, args.tokenizer),
+                    run_id=cast(str | None, args.run_id),
+                ),
+            )
+            print(render_markdown(report), end="")
+            return 0 if report.get("complete") is True else 1
         if command == "run":
             if not cast(bool, args.bats):
                 raise ValueError("synth run currently requires --bats")
@@ -620,6 +696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         EmbeddingUnavailableError,
         BatchWiringError,
+        BenchmarkError,
         EffectivenessError,
         EngineError,
         MattsError,

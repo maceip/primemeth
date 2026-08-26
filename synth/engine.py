@@ -10,6 +10,7 @@ from pathlib import Path
 
 MLX_INSTALL = "uv tool install mlx-lm"
 LLAMA_INSTALL = "brew install llama.cpp"
+QWEN4_LLAMA_SERVER = Path("/tmp/llamacpp-qwen4/build/bin/llama-server")
 _MLX_SUPPORT_PROBE = (
     "import importlib\n"
     "import json\n"
@@ -122,6 +123,8 @@ def require_mlx_model_support(model_dir: Path) -> str:
 
 
 def resolve_llama_server() -> list[str]:
+    if os.access(QWEN4_LLAMA_SERVER, os.X_OK):
+        return [str(QWEN4_LLAMA_SERVER)]
     found = shutil.which("llama-server")
     if found:
         return [found]
